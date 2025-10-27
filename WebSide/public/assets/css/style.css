@@ -1,0 +1,13 @@
+/* public/assets/css/style.css */
+body { margin:0; font-family: Arial, Helvetica, sans-serif; background:#f4f6fb; color:#222; }
+.sidebar { position: fixed; left:0; top:0; bottom:0; width:240px; background:#5A4BFF; color:#fff; padding:18px; }
+.sidebar a{ color:#fff; display:block; padding:10px 8px; text-decoration:none; margin-bottom:6px; border-radius:6px;}
+.sidebar a:hover{ background: rgba(255,255,255,0.08); }
+.content { margin-left:260px; padding:24px; }
+.login-bg { display:flex; height:100vh; align-items:center; justify-content:center; }
+.login-box { width:360px; background:#fff; padding:24px; border-radius:10px; box-shadow:0 6px 24px rgba(20,20,60,0.06); }
+.login-box input { width:100%; padding:10px; margin:8px 0; border:1px solid #eee; border-radius:6px; }
+.btn { padding:10px 14px; background:#6f56ff; color:#fff; border:none; border-radius:8px; cursor:pointer; }
+.card { background:#fff; padding:16px; border-radius:8px; box-shadow:0 4px 12px rgba(20,20,60,0.04); margin-bottom:12px; }
+table { width:100%; border-collapse:collapse; background:#fff; }
+table th, table td { padding:10px; border-bottom:1px solid #f1f2f8; text-align:left; }
