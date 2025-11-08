@@ -1,0 +1,60 @@
+/* --- DataTable Theme Styling --- */
+.dataTables_wrapper .dataTables_filter input {
+  border: 1px solid #0047AB;
+  border-radius: 6px;
+  padding: 5px 10px;
+  margin-left: 5px;
+  color: #333;
+}
+
+.dataTables_wrapper .dataTables_length select {
+  border: 1px solid #0047AB;
+  border-radius: 6px;
+  padding: 3px;
+  color: #333;
+}
+
+.dataTables_wrapper .dataTables_paginate .paginate_button {
+  background: #ffffff;
+  border: 1px solid #0047AB;
+  border-radius: 4px;
+  margin: 2px;
+  color: #0047AB !important;
+  padding: 4px 8px;
+}
+
+.dataTables_wrapper .dataTables_paginate .paginate_button.current {
+  background: #0047AB;
+  color: #fff !important;
+}
+
+.dataTables_wrapper .dataTables_info {
+  color: #0047AB;
+  font-weight: 500;
+}
+
+table.dataTable thead th {
+  background-color: #0047AB;
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+}
+
+table.dataTable tbody td {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.dataTables_wrapper .dt-buttons .dt-button {
+  background: #0047AB;
+  border: none;
+  color: #fff;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-weight: 500;
+  transition: 0.3s;
+}
+
+.dataTables_wrapper .dt-buttons .dt-button:hover {
+  background: #0066CC;
+}

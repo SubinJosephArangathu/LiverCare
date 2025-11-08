@@ -1,6 +1,6 @@
 <?php
 // public/admin_predict_row.php
-require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/auth_check.php';
 require_login();
 if(!is_admin()){
     echo json_encode(["success"=>false,"error"=>"Unauthorized"]); exit;
@@ -9,10 +9,16 @@ require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/crypto.php';
 require_once __DIR__ . '/../includes/db.php';
 
+// Read JSON input
 $input = json_decode(file_get_contents("php://input"), true);
-if(!$input){ echo json_encode(["success"=>false,"error"=>"Invalid input"]); exit; }
+if(!$input){ 
+    echo json_encode(["success"=>false,"error"=>"Invalid input"]); 
+    exit; 
+}
 
-// Normalize keys
+// ------------------------------
+// Normalize input keys
+// ------------------------------
 $map = function($k){
     $k_low = strtolower(trim($k));
     if(in_array($k_low, ['age'])) return 'Age';
@@ -31,26 +37,40 @@ $map = function($k){
     return $k;
 };
 
-// normalize
+// Normalize keys
 $normalized = [];
 foreach($input as $k => $v){
     $nk = $map($k);
     $normalized[$nk] = $v;
 }
 
-// Build payload in model's exact expected order
+// ------------------------------
+// Normalize Gender properly
+// ------------------------------
+$sex_input = isset($normalized['Sex']) ? strtolower(trim($normalized['Sex'])) : '';
+if(in_array($sex_input, ['m','male','1','true','t','yes'])){
+    $gender_plain = 'Male';
+} elseif(in_array($sex_input, ['f','female','0','false','n','no'])){
+    $gender_plain = 'Female';
+} else {
+    $gender_plain = 'Unknown';
+}
+
+// ------------------------------
+// Prepare payload for Flask API
+// ------------------------------
 $payload = [
-    'Age' => isset($normalized['Age']) ? floatval($normalized['Age']) : 0.0,
-    'Sex' => isset($normalized['Sex']) ? (strtolower($normalized['Sex']) === 'male' ? 1 : 0) : 0,
-    'ALB' => isset($normalized['ALB']) ? floatval($normalized['ALB']) : 0.0,
-    'ALP' => isset($normalized['ALP']) ? floatval($normalized['ALP']) : 0.0,
-    'ALT' => isset($normalized['ALT']) ? floatval($normalized['ALT']) : 0.0,
-    'AST' => isset($normalized['AST']) ? floatval($normalized['AST']) : 0.0,
-    'BIL' => isset($normalized['BIL']) ? floatval($normalized['BIL']) : 0.0,
-    'CHE' => isset($normalized['CHE']) ? floatval($normalized['CHE']) : 0.0,
+    'Age'  => isset($normalized['Age']) ? floatval($normalized['Age']) : 0.0,
+    'Sex'  => $sex_input,  // Flask API still gets numeric/binary value if needed
+    'ALB'  => isset($normalized['ALB']) ? floatval($normalized['ALB']) : 0.0,
+    'ALP'  => isset($normalized['ALP']) ? floatval($normalized['ALP']) : 0.0,
+    'ALT'  => isset($normalized['ALT']) ? floatval($normalized['ALT']) : 0.0,
+    'AST'  => isset($normalized['AST']) ? floatval($normalized['AST']) : 0.0,
+    'BIL'  => isset($normalized['BIL']) ? floatval($normalized['BIL']) : 0.0,
+    'CHE'  => isset($normalized['CHE']) ? floatval($normalized['CHE']) : 0.0,
     'CHOL' => isset($normalized['CHOL']) ? floatval($normalized['CHOL']) : 0.0,
     'CREA' => isset($normalized['CREA']) ? floatval($normalized['CREA']) : 0.0,
-    'GGT' => isset($normalized['GGT']) ? floatval($normalized['GGT']) : 0.0,
+    'GGT'  => isset($normalized['GGT']) ? floatval($normalized['GGT']) : 0.0,
     'PROT' => isset($normalized['PROT']) ? floatval($normalized['PROT']) : 0.0,
     'patient_id' => isset($normalized['ID']) ? 'DS_' . $normalized['ID'] : ('DS_' . time())
 ];
@@ -59,7 +79,9 @@ if(empty($payload['patient_id'])){
     echo json_encode(["success"=>false,"error"=>"Missing patient id"]); exit;
 }
 
-// call Flask API
+// ------------------------------
+// Call Flask API for prediction
+// ------------------------------
 $ch = curl_init();
 curl_setopt($ch, CURLOPT_URL, FLASK_PREDICT_URL);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -75,25 +97,41 @@ $curl_err = curl_error($ch);
 curl_close($ch);
 
 if($code !== 200){
-    echo json_encode(["success"=>false,"error"=>"Model server error","http_code"=>$code,"curl_err"=>$curl_err,"payload"=>$payload,"raw"=>$result]); exit;
+    echo json_encode([
+        "success"=>false,
+        "error"=>"Model server error",
+        "http_code"=>$code,
+        "curl_err"=>$curl_err,
+        "payload"=>$payload,
+        "raw"=>$result
+    ]); 
+    exit;
 }
+
 $resp = json_decode($result, true);
 if(!$resp || empty($resp['prediction'])){
     echo json_encode(["success"=>false,"error"=>"Invalid model response","raw"=>$result]); exit;
 }
 
-// Save encrypted row (store lab values encrypted)
+// ------------------------------
+// Save prediction in DB (with gender encrypted now)
+// ------------------------------
 $pdo = getPDO();
 try {
-    $stmt = $pdo->prepare("INSERT INTO predictions (user_id, reference_row_id, patient_id, age, gender, ALB,ALP,ALT,AST,BIL,CHE,CHOL,CREA,GGT,PROT, predicted_label, probability, source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt = $pdo->prepare("
+        INSERT INTO predictions (
+            user_id, reference_row_id, patient_id, age, gender,
+            ALB, ALP, ALT, AST, BIL, CHE, CHOL, CREA, GGT, PROT,
+            predicted_label, probability, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
     $ref_id = isset($normalized['ID']) ? intval($normalized['ID']) : NULL;
     $stmt->execute([
         $_SESSION['user_id'],
         $ref_id,
         encrypt_data(strval($payload['patient_id'])),
         encrypt_data(strval($payload['Age'])),
-        encrypt_data(strval($payload['Sex'])),
+        encrypt_data($gender_plain), // Encrypt gender now
         encrypt_data(strval($payload['ALB'])),
         encrypt_data(strval($payload['ALP'])),
         encrypt_data(strval($payload['ALT'])),
@@ -109,16 +147,15 @@ try {
         'dataset'
     ]);
 } catch (PDOException $e){
-    // fallback minimal
-    $stmt2 = $pdo->prepare("INSERT INTO predictions (user_id, gender, patient_id, predicted_label, probability, source) VALUES (?, ?, ?, ?, ?)");
-    $stmt2->execute([
-        $_SESSION['user_id'],
-        encrypt_data(strval($payload['Sex'])),
-        encrypt_data(strval($payload['patient_id'])),
-        encrypt_data(strval($resp['prediction'])),
-        floatval($resp['probability'] ?? 0.0),
-        'dataset'
-    ]);
+    echo json_encode(["success"=>false,"error"=>"DB insert failed","details"=>$e->getMessage()]); exit;
 }
 
-echo json_encode(["success"=>true,"prediction"=>$resp['prediction'],"probability"=>$resp['probability'] ?? 0.0]);
+// ------------------------------
+// Return response
+// ------------------------------
+echo json_encode([
+    "success"=>true,
+    "prediction"=>$resp['prediction'],
+    "probability"=>$resp['probability'] ?? 0.0,
+    "gender"=>$gender_plain
+]);

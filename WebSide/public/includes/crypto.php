@@ -30,4 +30,3 @@ function decrypt_data($b64blob) {
     $plaintext = openssl_decrypt($ciphertext, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag);
     return $plaintext;
 }
-?>

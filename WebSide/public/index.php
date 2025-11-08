@@ -1,33 +1,42 @@
-<?php
-// public/index.php
-require_once __DIR__ . '/../includes/db.php';
-require_once __DIR__ . '/../includes/config.php';
-// session_start();
-if(!empty($_SESSION['user_id'])){
-    if($_SESSION['role']=='admin') header("Location: /admin_dashboard.php");
-    else header("Location: /staff_predict.php");
-    exit;
-}
-?>
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Login - LiverCare</title>
-  <link rel="stylesheet" href="/assets/css/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Liver Disease Prediction System</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/style.css">
 </head>
-<body class="login-bg">
-  <div class="login-box">
-    <h2>LiverCare</h2>
-    <?php if(!empty($_GET['error'])): ?>
-      <div class="error"><?=htmlspecialchars($_GET['error'])?></div>
-    <?php endif; ?>
-    <form method="post" action="login_action.php">
-      <input type="text" name="username" placeholder="Username" required />
-      <input type="password" name="password" placeholder="Password" required />
-      <button type="submit" class="btn">Login</button>
-    </form>
+<body>
+
+  <!-- Background Image Slider -->
+  <div id="slider">
+      <div class="slide" style="background-image: url('assets/img/liver1.png');"></div>
+      <div class="slide" style="background-image: url('assets/img/liver2.png');"></div>
+      <div class="slide" style="background-image: url('assets/img/liver3.png');"></div>
+      <div class="slide" style="background-image: url('assets/img/liver4.png');"></div>
   </div>
+
+  <!-- Overlay -->
+  <div class="overlay"></div>
+
+  <!-- Login Box -->
+  <div class="login-box text-center">
+      <h2 class="mb-4">LiverCare</h2>
+      <form method="post" action="login_action.php">
+          <div class="mb-3">
+              <input type="text" name="username" class="form-control" placeholder="Username" required />
+          </div>
+          <div class="mb-3">
+              <input type="password" name="password" class="form-control" placeholder="Password" required />
+          </div>
+          <button type="submit" class="btn btn-success w-100">Login</button>
+      </form>
+      <div class="text-center mt-3">
+         
+      </div>
+  </div>
+
+  <script src="assets/js/script.js"></script>
 </body>
 </html>

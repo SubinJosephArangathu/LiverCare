@@ -1,9 +1,13 @@
 <?php
-require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/auth_check.php';
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/crypto.php';
+
 require_login();
-if(!is_admin()){ header("Location: /index.php"); exit; }
+if(!is_admin()){ 
+    header("Location: /index.php"); 
+    exit; 
+}
 
 $pdo = getPDO();
 
@@ -12,12 +16,24 @@ if(!empty($_GET['ajax'])){
     $rows = $pdo->query("SELECT predicted_label, gender FROM predictions")->fetchAll();
     $labelCounts = [];
     $genderCounts = ['Male'=>0,'Female'=>0,'Unknown'=>0];
+
     foreach($rows as $r){
+        // Decrypt predicted label
         $label = decrypt_data($r['predicted_label']);
-        $genderVal = $r['gender'] ? decrypt_data($r['gender']) : 'Unknown';
+
+        // Decrypt gender
+        $genderVal = decrypt_data($r['gender']);
+        if (!in_array($genderVal, ['Male','Female','Unknown'])) {
+            $genderVal = 'Unknown';
+        }
+
+        // Count labels
         $labelCounts[$label] = ($labelCounts[$label] ?? 0) + 1;
-        if(isset($genderCounts[$genderVal])) $genderCounts[$genderVal]++; else $genderCounts['Unknown']++;
+
+        // Count genders
+        $genderCounts[$genderVal]++;
     }
+
     echo json_encode([
         'labels'=>array_keys($labelCounts),
         'counts'=>array_values($labelCounts),
@@ -27,7 +43,7 @@ if(!empty($_GET['ajax'])){
     exit;
 }
 
-// non-AJAX render - show table of predictions
+// Non-AJAX render - show table of predictions
 $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at DESC LIMIT 200")->fetchAll();
 ?>
 <!doctype html>
@@ -47,13 +63,31 @@ $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at DESC LIMIT 20
   <div class="content">
     <h2>Recent Predictions</h2>
     <table>
-      <thead><tr><th>ID</th><th>Patient</th><th>Gender</th><th>Label</th><th>Prob</th><th>User</th><th>Created</th></tr></thead>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Patient</th>
+          <th>Gender</th>
+          <th>Label</th>
+          <th>Probability</th>
+          <th>User</th>
+          <th>Created</th>
+        </tr>
+      </thead>
       <tbody>
         <?php foreach($rows as $r): ?>
           <tr>
-            <td><?=$r['id']?></td>
+            <td><?=htmlspecialchars($r['id'])?></td>
             <td><?=htmlspecialchars(decrypt_data($r['patient_id']))?></td>
-             <td><?=htmlspecialchars(decrypt_data($r['gender']))?></td>
+            <td>
+                <?php
+                $genderVal = decrypt_data($r['gender']);
+                if (!in_array($genderVal, ['Male','Female','Unknown'])) {
+                    $genderVal = 'Unknown';
+                }
+                echo htmlspecialchars($genderVal);
+                ?>
+            </td>
             <td><?=htmlspecialchars(decrypt_data($r['predicted_label']))?></td>
             <td><?=htmlspecialchars($r['probability'])?></td>
             <td><?=htmlspecialchars($r['user_id'])?></td>
