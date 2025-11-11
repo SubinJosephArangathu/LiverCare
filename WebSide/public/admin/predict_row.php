@@ -5,11 +5,14 @@ require_login();
 if(!is_admin()){
     echo json_encode(["success"=>false,"error"=>"Unauthorized"]); exit;
 }
+
 require_once __DIR__ . '/../includes/config.php';
 require_once __DIR__ . '/../includes/crypto.php';
 require_once __DIR__ . '/../includes/db.php';
 
-// Read JSON input
+// ------------------------------
+// Read and Validate JSON Input
+// ------------------------------
 $input = json_decode(file_get_contents("php://input"), true);
 if(!$input){ 
     echo json_encode(["success"=>false,"error"=>"Invalid input"]); 
@@ -21,20 +24,16 @@ if(!$input){
 // ------------------------------
 $map = function($k){
     $k_low = strtolower(trim($k));
-    if(in_array($k_low, ['age'])) return 'Age';
-    if(in_array($k_low, ['sex','gender'])) return 'Sex';
-    if(in_array($k_low, ['alb','albu'])) return 'ALB';
-    if(in_array($k_low, ['alp'])) return 'ALP';
-    if(in_array($k_low, ['alt'])) return 'ALT';
-    if(in_array($k_low, ['ast'])) return 'AST';
-    if(in_array($k_low, ['bil'])) return 'BIL';
-    if(in_array($k_low, ['che'])) return 'CHE';
-    if(in_array($k_low, ['chol','ch'])) return 'CHOL';
-    if(in_array($k_low, ['crea','creatinine','creatinine_mg'])) return 'CREA';
-    if(in_array($k_low, ['ggt'])) return 'GGT';
-    if(in_array($k_low, ['prot','protein'])) return 'PROT';
-    if(in_array($k_low, ['id','row','rowid'])) return 'ID';
-    return $k;
+    $mapping = [
+        'age' => 'Age', 'sex' => 'Sex', 'gender' => 'Sex',
+        'alb' => 'ALB', 'albu' => 'ALB',
+        'alp' => 'ALP', 'alt' => 'ALT', 'ast' => 'AST', 'bil' => 'BIL',
+        'che' => 'CHE', 'chol' => 'CHOL', 'ch' => 'CHOL',
+        'crea' => 'CREA', 'creatinine' => 'CREA', 'creatinine_mg' => 'CREA',
+        'ggt' => 'GGT', 'prot' => 'PROT', 'protein' => 'PROT',
+        'id' => 'ID', 'row' => 'ID', 'rowid' => 'ID'
+    ];
+    return $mapping[$k_low] ?? $k;
 };
 
 // Normalize keys
@@ -61,7 +60,7 @@ if(in_array($sex_input, ['m','male','1','true','t','yes'])){
 // ------------------------------
 $payload = [
     'Age'  => isset($normalized['Age']) ? floatval($normalized['Age']) : 0.0,
-    'Sex'  => $sex_input,  // Flask API still gets numeric/binary value if needed
+    'Sex'  => $sex_input,
     'ALB'  => isset($normalized['ALB']) ? floatval($normalized['ALB']) : 0.0,
     'ALP'  => isset($normalized['ALP']) ? floatval($normalized['ALP']) : 0.0,
     'ALT'  => isset($normalized['ALT']) ? floatval($normalized['ALT']) : 0.0,
@@ -104,7 +103,7 @@ if($code !== 200){
         "curl_err"=>$curl_err,
         "payload"=>$payload,
         "raw"=>$result
-    ]); 
+    ]);
     exit;
 }
 
@@ -114,48 +113,73 @@ if(!$resp || empty($resp['prediction'])){
 }
 
 // ------------------------------
-// Save prediction in DB (with gender encrypted now)
+// Extract result fields safely
+// ------------------------------
+$prediction = $resp['prediction'] ?? 'Unknown';
+$probability = $resp['probability'] ?? 0.0;
+$risk_level = $resp['risk_level'] ?? 'Unknown';
+$model_version = $resp['model_version'] ?? 'v1.0';
+$top_factors = json_encode($resp['top_factors'] ?? []);
+$explanation_text = json_encode($resp['explanation_text'] ?? []);
+
+// ------------------------------
+// Save prediction in DB
 // ------------------------------
 $pdo = getPDO();
 try {
     $stmt = $pdo->prepare("
         INSERT INTO predictions (
-            user_id, reference_row_id, patient_id, age, gender,
+            user_id, patient_id, age, gender,
             ALB, ALP, ALT, AST, BIL, CHE, CHOL, CREA, GGT, PROT,
-            predicted_label, probability, source
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            predicted_label, probability, risk_level, top_factors, explanation_text, model_version, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ");
     $ref_id = isset($normalized['ID']) ? intval($normalized['ID']) : NULL;
-    $stmt->execute([
-        $_SESSION['user_id'],
-        $ref_id,
-        encrypt_data(strval($payload['patient_id'])),
-        encrypt_data(strval($payload['Age'])),
-        encrypt_data($gender_plain), // Encrypt gender now
-        encrypt_data(strval($payload['ALB'])),
-        encrypt_data(strval($payload['ALP'])),
-        encrypt_data(strval($payload['ALT'])),
-        encrypt_data(strval($payload['AST'])),
-        encrypt_data(strval($payload['BIL'])),
-        encrypt_data(strval($payload['CHE'])),
-        encrypt_data(strval($payload['CHOL'])),
-        encrypt_data(strval($payload['CREA'])),
-        encrypt_data(strval($payload['GGT'])),
-        encrypt_data(strval($payload['PROT'])),
-        encrypt_data(strval($resp['prediction'])),
-        floatval($resp['probability'] ?? 0.0),
-        'dataset'
-    ]);
+    $stmt = $pdo->prepare("
+    INSERT INTO predictions (
+        user_id, patient_id, age, gender,
+        ALB, ALP, ALT, AST, BIL, CHE, CHOL, CREA, GGT, PROT,
+        predicted_label, probability, risk_level, top_factors, explanation_text, model_version, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+");
+
+$stmt->execute([
+    $_SESSION['user_id'],                        // user_id
+    encrypt_data(strval($payload['patient_id'])),// patient_id
+    encrypt_data(strval($payload['Age'])),       // age
+    encrypt_data($gender_plain),                 // gender
+    encrypt_data(strval($payload['ALB'])),       // ALB
+    encrypt_data(strval($payload['ALP'])),       // ALP
+    encrypt_data(strval($payload['ALT'])),       // ALT
+    encrypt_data(strval($payload['AST'])),       // AST
+    encrypt_data(strval($payload['BIL'])),       // BIL
+    encrypt_data(strval($payload['CHE'])),       // CHE
+    encrypt_data(strval($payload['CHOL'])),      // CHOL
+    encrypt_data(strval($payload['CREA'])),      // CREA
+    encrypt_data(strval($payload['GGT'])),       // GGT
+    encrypt_data(strval($payload['PROT'])),      // PROT
+    encrypt_data(strval($prediction)),           // predicted_label
+    floatval($probability),                      // probability
+    $risk_level,                                 // risk_level
+    $top_factors,                                // top_factors (JSON string)
+    $explanation_text,                           // explanation_text (JSON string)
+    $model_version,                              // model_version
+    'dataset'                                    // source
+]);
 } catch (PDOException $e){
     echo json_encode(["success"=>false,"error"=>"DB insert failed","details"=>$e->getMessage()]); exit;
 }
 
 // ------------------------------
-// Return response
+// Return response to frontend
 // ------------------------------
 echo json_encode([
-    "success"=>true,
-    "prediction"=>$resp['prediction'],
-    "probability"=>$resp['probability'] ?? 0.0,
-    "gender"=>$gender_plain
+    "success" => true,
+    "prediction" => $prediction,
+    "probability" => $probability,
+    "risk_level" => $risk_level,
+    "top_factors" => json_decode($top_factors, true),
+    "explanation_text" => json_decode($explanation_text, true),
+    "model_version" => $model_version,
+    "gender" => $gender_plain
 ]);

@@ -248,12 +248,22 @@ footer {
 
 <!-- Prediction Modal -->
 <div class="modal fade" id="predictModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-lg">
     <div class="modal-content p-4">
-      <h5 class="mb-3">Prediction Result</h5>
-      <p id="modalPrediction" style="font-weight:600;"></p>
-      <p id="modalProbability"></p>
-      <button type="button" class="btn btn-primary mt-2" data-bs-dismiss="modal">Close</button>
+      <h5 class="mb-3 text-primary fw-bold">Prediction Result</h5>
+      <div class="modal-body">
+        <p><strong>Prediction:</strong> <span id="modalPrediction"></span></p>
+        <p><strong>Risk Level:</strong> <span id="modalRisk"></span></p>
+        <p><strong>Confidence:</strong> <span id="modalConfidence"></span></p>
+        <hr>
+        <p><strong>Explanation Summary:</strong></p>
+        <p id="modalExplanationText" class="fst-italic"></p>
+        <p><strong>Top Contributing Factors:</strong></p>
+        <ul id="modalFactors" class="factor-list"></ul>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+      </div>
     </div>
   </div>
 </div>
@@ -309,11 +319,24 @@ $(document).ready(function() {
     .then(res => res.json())
     .then(resp => {
       if (resp.success) {
-        $('#modalPrediction').text('Prediction: ' + resp.prediction);
-        $('#modalProbability').text('Probability: ' + (resp.probability ?? 0).toFixed(2));
+        $('#modalPrediction').text(resp.prediction ?? 'N/A');
+        $('#modalRisk').text(resp.risk_level ?? 'N/A');
+        $('#modalConfidence').text(((resp.probability ?? 0) * 100).toFixed(2) + '%');
+        $('#modalExplanationText').text(resp.explanation_text ?? 'No detailed explanation available.');
+
+        const list = $('#modalFactors');
+        list.empty();
+        if (Array.isArray(resp.top_factors) && resp.top_factors.length) {
+          resp.top_factors.forEach(f => {
+            list.append(`<li>${f.explanation}</li>`);
+          });
+        } else {
+          list.append('<li>No factor insights available.</li>');
+        }
+
         predictModal.show();
       } else {
-        alert('Error: ' + resp.error);
+        alert('Error: ' + (resp.error || 'Unknown'));
       }
     })
     .catch(err => { console.error(err); alert('Request failed'); });
