@@ -12,24 +12,23 @@ if(!$input){
     exit;
 }
 
-// Construct payload for Flask model (order must match model feature_order)
+// Build payload for Flask
 $payload = [
     'patient_id' => $input['patient_id'] ?? ('P_' . time()),
-    'Age' => floatval($input['Age'] ?? $input['age'] ?? 0.0),
-    'Sex' => $input['Sex'] ?? $input['gender'] ?? '',
-    'ALB' => floatval($input['ALB'] ?? 0.0),
-    'ALP' => floatval($input['ALP'] ?? 0.0),
-    'ALT' => floatval($input['ALT'] ?? 0.0),
-    'AST' => floatval($input['AST'] ?? 0.0),
-    'BIL' => floatval($input['BIL'] ?? 0.0),
-    'CHE' => floatval($input['CHE'] ?? 0.0),
-    'CHOL' => floatval($input['CHOL'] ?? 0.0),
-    'CREA' => floatval($input['CREA'] ?? 0.0),
-    'GGT' => floatval($input['GGT'] ?? 0.0),
-    'PROT' => floatval($input['PROT'] ?? 0.0)
+    'Age'        => floatval($input['Age'] ?? $input['age'] ?? 0.0),
+    'Gender'     => $input['Gender'] ?? $input['gender'] ?? '',
+    'TB'         => floatval($input['TB'] ?? 0.0),
+    'DB'         => floatval($input['DB'] ?? 0.0),
+    'Alkphos'    => floatval($input['Alkphos'] ?? 0.0),
+    'Sgpt'       => floatval($input['Sgpt'] ?? 0.0),
+    'Sgot'       => floatval($input['Sgot'] ?? 0.0),
+    'TP'         => floatval($input['TP'] ?? 0.0),
+    'ALB'        => floatval($input['ALB'] ?? 0.0),
+    // send as A_G so Flask (and model) accept it (Flask accepts A_G, AG_Ratio etc.)
+    'A_G'        => floatval($input['A_G'] ?? $input['A/G Ratio'] ?? $input['AG_Ratio'] ?? 0.0)
 ];
 
-// --- CURL to Flask ---
+// Send to Flask API
 $ch = curl_init();
 curl_setopt_array($ch, [
     CURLOPT_URL => FLASK_PREDICT_URL,
@@ -44,7 +43,7 @@ $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 $curl_err = curl_error($ch);
 curl_close($ch);
 
-// Log raw Flask response (for debugging)
+// Log Flask response for debugging
 $log_dir = __DIR__ . '/../logs';
 if (!file_exists($log_dir)) mkdir($log_dir, 0777, true);
 file_put_contents($log_dir . '/flask_response.json', $res);
@@ -66,35 +65,31 @@ if (!$resp || !isset($resp['prediction'])) {
     exit;
 }
 
-// --- Extract values safely ---
+// Extract outputs (be tolerant of different key names)
 $prediction       = $resp['prediction'] ?? 'Unknown';
-$probability      = floatval($resp['probability'] ?? 0.0);
+$probability      = floatval($resp['probability_primary'] ?? $resp['probability'] ?? $resp['disease_probability'] ?? $resp['confidence_original'] ?? 0.0);
 $risk_level       = $resp['risk_level'] ?? '';
 $top_factors      = $resp['top_factors'] ?? [];
-$explanation_text = $resp['explanation_text'] ?? '';
+$explanation_text = $resp['explanation_text'] ?? ($resp['explanation'] ?? '');
 $model_version    = $resp['model_version'] ?? '';
 $record_hash      = $resp['hash'] ?? null;
 
-// --- Handle second opinion ---
-$second_opinion = $resp['second_opinion'] ?? null;
-$second_opinion_model = null;
-$second_opinion_pred  = null;
-$second_opinion_prob  = null;
+// second opinion
+$second_opinion   = $resp['second_opinion'] ?? null;
+$second_op_model  = $second_opinion['model'] ?? null;
+$second_op_pred   = $second_opinion['prediction'] ?? null;
+$second_op_prob   = isset($second_opinion['probability']) ? floatval($second_opinion['probability']) : null;
 
-if (is_array($second_opinion)) {
-    $second_opinion_model = $second_opinion['model'] ?? null;
-    $second_opinion_pred  = $second_opinion['prediction'] ?? null;
-    $second_opinion_prob  = isset($second_opinion['probability']) ? floatval($second_opinion['probability']) : null;
-}
-
-// --- Save to DB ---
+// Save to DB
 $pdo = getPDO();
 
-// Ensure DB column `second_opinion` exists or use JSON field for flexibility
+// column name for AG ratio in DB - adjust if your DB column differs
+$ag_db_column = 'AG_Ratio'; // keep as in your DB
+
 $sql = "INSERT INTO predictions 
-(user_id, patient_id, age, gender, ALB, ALP, ALT, AST, BIL, CHE, CHOL, CREA, GGT, PROT, 
+(user_id, patient_id, age, gender, TB, DB, Alkphos, Sgpt, Sgot, TP, ALB, {$ag_db_column},
  predicted_label, probability, risk_level, top_factors, explanation_text, model_version, record_hash, source, second_opinion)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 try {
     $stmt = $pdo->prepare($sql);
@@ -102,17 +97,17 @@ try {
         $_SESSION['user_id'] ?? null,
         encrypt_data($payload['patient_id']),
         encrypt_data((string)$payload['Age']),
-        encrypt_data((string)$payload['Sex']),
+        encrypt_data((string)$payload['Gender']),
+        encrypt_data((string)$payload['TB']),
+        encrypt_data((string)$payload['DB']),
+        encrypt_data((string)$payload['Alkphos']),
+        encrypt_data((string)$payload['Sgpt']),
+        encrypt_data((string)$payload['Sgot']),
+        encrypt_data((string)$payload['TP']),
         encrypt_data((string)$payload['ALB']),
-        encrypt_data((string)$payload['ALP']),
-        encrypt_data((string)$payload['ALT']),
-        encrypt_data((string)$payload['AST']),
-        encrypt_data((string)$payload['BIL']),
-        encrypt_data((string)$payload['CHE']),
-        encrypt_data((string)$payload['CHOL']),
-        encrypt_data((string)$payload['CREA']),
-        encrypt_data((string)$payload['GGT']),
-        encrypt_data((string)$payload['PROT']),
+        encrypt_data((string)$payload['A_G']),
+
+        // predicted label might already be "No Liver Disease"/"Liver Disease"
         encrypt_data((string)$prediction),
         $probability,
         $risk_level,
@@ -122,9 +117,9 @@ try {
         $record_hash,
         'staff',
         json_encode([
-            'model' => $second_opinion_model,
-            'prediction' => $second_opinion_pred,
-            'probability' => $second_opinion_prob
+            'model' => $second_op_model,
+            'prediction' => $second_op_pred,
+            'probability' => $second_op_prob
         ])
     ]);
 } catch (PDOException $e) {
@@ -132,7 +127,7 @@ try {
     exit;
 }
 
-// --- Respond to frontend ---
+// Build response to frontend (mirror useful fields)
 $response = [
     'success' => true,
     'prediction' => $prediction,
@@ -143,13 +138,19 @@ $response = [
     'model_version' => $model_version
 ];
 
-// Include second opinion in frontend JSON if available
-if ($second_opinion_model || $second_opinion_pred) {
+if ($second_op_model || $second_op_pred) {
     $response['second_opinion'] = [
-        'model' => $second_opinion_model,
-        'prediction' => $second_opinion_pred,
-        'probability' => $second_opinion_prob
+        'model' => $second_op_model,
+        'prediction' => $second_op_pred,
+        'probability' => $second_op_prob
     ];
 }
+
+// optionally include other returned fields if present
+if (isset($resp['confidence_final'])) $response['confidence_final'] = $resp['confidence_final'];
+if (isset($resp['probability_primary'])) $response['probability_primary'] = $resp['probability_primary'];
+if (isset($resp['disease_probability'])) $response['disease_probability'] = $resp['disease_probability'];
+if (isset($resp['food_recommendations'])) $response['food_recommendations'] = $resp['food_recommendations'];
+if (isset($resp['medical_warning'])) $response['medical_warning'] = $resp['medical_warning'];
 
 echo json_encode($response);

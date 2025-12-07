@@ -23,10 +23,11 @@ function loadCSV($file) {
 
 $mode = $_GET["mode"] ?? "test";
 if ($mode === "full") {
-  [$header, $dataset] = loadCSV(__DIR__ . "/../liver_disease.csv");
+    [$header, $dataset] = loadCSV(__DIR__ . "/../Liver Patient Dataset (LPD)_train.csv");
 } else {
-  [$header, $dataset] = loadCSV(__DIR__ . "/../model_test_results.csv");
+    [$header, $dataset] = loadCSV(__DIR__ . "/../model_test_results.csv");
 }
+
 
 $clean_header = [];
 foreach ($header as $h) {

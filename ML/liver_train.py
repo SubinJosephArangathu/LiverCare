@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """
-liver_train_fixed.py
+liver_train.py
 
-Professional HCV multi-class training pipeline.
-Fixes:
- - drop 'Unnamed: 0' column if present
- - keep Age + Sex + original lab features
- - stratified train/test split, then SMOTE only on training set
- - RobustScaler for numeric features
- - class-weight-aware models
- - probability calibration
- - save artifacts for Flask/PHP: model, scaler, encoder, feature_order, label mapping
- - export model_test_results.csv and test_data_sample.csv for admin UI validation
- - confusion matrix PNGs and PDF report
+Training pipeline for the Liver Patient Dataset (LPD).
+- Reads CSV with encoding fallback
+- Maps Result: 1 -> disease (1), 2 -> no disease (0)
+- Keeps Gender (maps Male->1 Female->0)
+- Imputes medians, SMOTE on train, RobustScaler
+- Trains multiple models, calibrates, selects best model by test accuracy
+- Saves artifacts for Flask/PHP:
+    training_output/best_hcv_model.pkl
+    training_output/alt_model.pkl   (second-best model; optional)
+    training_output/scaler.pkl
+    training_output/label_encoder.pkl
+    training_output/feature_order.pkl
+    training_output/label_mapping.json
+    training_output/model_test_results.csv
+    training_output/test_data_sample.csv
+- Produces a PDF & confusion matrices
 """
-
 import os
 import json
 import time
 from datetime import datetime
-
+from xgboost import XGBClassifier
 import numpy as np
 import pandas as pd
 import joblib
@@ -28,7 +32,7 @@ import seaborn as sns
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import RobustScaler, LabelEncoder
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 from sklearn.ensemble import RandomForestClassifier
@@ -40,7 +44,8 @@ from sklearn.calibration import CalibratedClassifierCV
 from imblearn.over_sampling import SMOTE
 
 # ---------------- Config ----------------
-DATA_FILE = "liver_disease.csv"
+# File - replace with your csv filename if different
+DATA_FILE = "Liver Patient Dataset (LPD)_train.csv"
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
 N_SPLITS = 5
@@ -48,77 +53,144 @@ SMOTE_RANDOM = 42
 OUTPUT_DIR = "training_output"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ---------------- Load ----------------
+# ---------------- Load dataset (robust encoding) ----------------
 print("📥 Loading dataset:", DATA_FILE)
-df = pd.read_csv(DATA_FILE)
-print("    initial shape:", df.shape)
+# Try common encodings and engine that handles weird chars
+encodings_to_try = ["utf-8", "latin1", "iso-8859-1", "cp1252"]
+df = None
+for enc in encodings_to_try:
+    try:
+        df = pd.read_csv(DATA_FILE, encoding=enc, engine="python")
+        print(f"    loaded with encoding: {enc}, shape: {df.shape}")
+        break
+    except Exception as e:
+        print(f"    failed with {enc}: {e}")
+if df is None:
+    raise RuntimeError("Failed to read dataset in tried encodings. Please check file or provide a different path/encoding.")
 
-# Drop Unnamed: 0 if it's present (it's not a real feature)
-if 'Unnamed: 0' in df.columns:
-    print("⚠ Removing 'Unnamed: 0' column (not a real feature).")
-    df.drop(columns=['Unnamed: 0'], inplace=True)
+# Normalize column names (strip BOM/non-breaking spaces)
+df.columns = [c.strip().replace('\xa0', ' ').replace('\u00A0',' ').replace(' ', '_') for c in df.columns]
 
-# If an index-like column with other name exists, it's left alone. We expect Age, Sex, labs, Category.
-# Standardize Sex encoding
-if 'Sex' in df.columns:
-    df['Sex'] = df['Sex'].replace({'m':'Male','M':'Male','f':'Female','F':'Female'})
-    df['Sex'] = df['Sex'].map({'Male': 1, 'Female': 0}).astype(int)
+print("Columns:", df.columns.tolist())
 
-# Drop rows with missing Category
-if 'Category' not in df.columns:
-    raise ValueError("Dataset must have a 'Category' column with class labels.")
+# Expecting the fields:
+# Age, Gender, TB (Total Bilirubin), DB (Direct Bilirubin), Alkphos,
+# Sgpt, Sgot, TP, ALB, A/G_Ratio (maybe named 'A/G Ratio' before cleanup), Result
+
+# map column name variants
+col_map = {}
+for c in df.columns:
+    lc = c.lower()
+    if 'age' in lc and 'age' not in col_map:
+        col_map['Age'] = c
+    if 'gender' in lc and 'gender' not in col_map:
+        col_map['Gender'] = c
+    if 'tb' in lc or 'total bilirubin' in lc:
+        col_map['TB'] = c
+    if 'db' in lc or 'direct bilirubin' in lc:
+        col_map['DB'] = c
+    if 'alk' in lc or 'alkphos' in lc or 'alkaline' in lc:
+        col_map['Alkphos'] = c
+    if 'sgpt' in lc or 'alanine' in lc:
+        col_map['Sgpt'] = c
+    if 'sgot' in lc or 'aspartate' in lc:
+        col_map['Sgot'] = c
+    if 'tp' in lc or 'total protein' in lc or 'total_protiens' in lc:
+        col_map['TP'] = c
+    if 'alb' in lc and 'a/g' not in lc:
+        col_map['ALB'] = c
+    if 'a/g' in lc or 'a/g ratio' in lc or 'ag_ratio' in lc or 'a_g' in lc:
+        col_map['A_G'] = c
+    if 'result' in lc or 'selector' in lc:
+        col_map['Result'] = c
+
+# Check mandatory
+required = ['Age','Gender','TB','DB','Alkphos','Sgpt','Sgot','TP','ALB','A_G','Result']
+missing_required = [r for r in required if r not in col_map]
+if missing_required:
+    print("⚠ Missing expected columns (attempting to proceed):", missing_required)
+    # don't fail hard; proceed with what's available
+
+# rename cols to standard names for pipeline
+rename_dict = {v:k for k,v in col_map.items()}
+df = df.rename(columns=rename_dict)
+print("After rename, columns:", df.columns.tolist())
+
+# ---------------- Basic cleaning ----------------
+# Strip whitespace in string columns
+for c in df.select_dtypes(include=['object']).columns:
+    df[c] = df[c].astype(str).str.strip()
+
+# Fix gender: map male/female to 1/0
+if 'Gender' in df.columns:
+    df['Gender'] = df['Gender'].replace({'M':'Male','F':'Female','m':'Male','f':'Female'})
+    df['Gender'] = df['Gender'].map(lambda x: 1 if str(x).strip().lower().startswith('m') else (0 if str(x).strip().lower().startswith('f') else np.nan))
+
+# Map Result: original dataset uses 1 (Liver Patient) and 2 (Non Liver)
+if 'Result' not in df.columns:
+    raise ValueError("Dataset must contain a Result column (target).")
+# ensure numeric
+df['Result'] = pd.to_numeric(df['Result'], errors='coerce')
+# map to 0/1: 1 -> 1 (disease), 2 -> 0 (no disease)
+df['Category'] = df['Result'].map(lambda x: 1 if int(x) == 1 else 0)
+
+# Drop rows with no Category
 df = df.dropna(subset=['Category'])
-print("    after dropping rows w/o Category:", df.shape)
+df['Category'] = df['Category'].astype(int)
 
-# Fill numeric missing values with median (feature-wise)
-numeric_cols = [c for c in df.columns if c != 'Category' and df[c].dtype != 'object']
-for c in numeric_cols:
-    med = df[c].median()
-    df[c] = df[c].fillna(med)
-
-# If Sex is numeric but has NaNs, fill with mode
-if 'Sex' in df.columns:
-    if df['Sex'].isnull().any():
-        df['Sex'].fillna(df['Sex'].mode()[0], inplace=True)
-
-# Print label distribution
-print("\n📊 Class distribution (original):")
+print("    after mapping Category, shape:", df.shape)
+print("📊 Class distribution (original):")
 print(df['Category'].value_counts())
 
-# Encode labels using LabelEncoder but also preserve mapping to human labels
-label_encoder = LabelEncoder()
-df['label'] = label_encoder.fit_transform(df['Category'])
-label_map = {int(v): k for k, v in zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_))}
-print("\n🔤 Label mapping (encoded -> name):", label_map)
+# ---------------- Select features ----------------
+# Keep columns in a consistent order (Age, Gender, TB, DB, Alkphos, Sgpt, Sgot, TP, ALB, A_G)
+features = []
+for key in ['Age','Gender','TB','DB','Alkphos','Sgpt','Sgot','TP','ALB','A_G']:
+    if key in df.columns:
+        features.append(key)
+    else:
+        print(f"⚠ Column {key} not found — will attempt to continue without it.")
 
-# Build X, y preserving original feature columns (drop only Category and label)
-X = df.drop(columns=['Category','label'])
-y = df['label']
+if len(features) < 5:
+    print("⚠ Few features found; check dataset columns. Found features:", features)
 
-print("\n📋 Features used (columns):")
+X = df[features].copy()
+y = df['Category'].copy()
+
+# Convert numeric where possible
+for col in X.columns:
+    X[col] = pd.to_numeric(X[col], errors='coerce')
+
+# Fill numeric missing values with median
+for c in X.columns:
+    med = X[c].median()
+    X[c] = X[c].fillna(med)
+
+# If Gender has NaNs after mapping, fill with mode (0 or 1)
+if 'Gender' in X.columns and X['Gender'].isnull().any():
+    X['Gender'] = X['Gender'].fillna(X['Gender'].mode()[0])
+
+print("\n📋 Final features used:")
 print(list(X.columns))
 
-# Save feature order used for prediction (so Flask/PHP must send these fields in this order)
+# Save feature_order
 feature_order = list(X.columns)
 joblib.dump(feature_order, os.path.join(OUTPUT_DIR, "feature_order.pkl"))
 with open(os.path.join(OUTPUT_DIR, "feature_order.json"), "w") as f:
     json.dump(feature_order, f, indent=2)
 print("✅ feature_order saved to", os.path.join(OUTPUT_DIR, "feature_order.json"))
 
-# ---------------- Train / Test split ----------------
-print("\n🔀 Doing stratified train/test split (test_size=", TEST_SIZE, ")")
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE,
-                                                    stratify=y, random_state=RANDOM_STATE)
+# ---------------- Train/test split ----------------
+print("\n🔀 Stratified train/test split (test_size=", TEST_SIZE, ")")
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE)
 print("   Train:", X_train.shape, "Test:", X_test.shape)
-print("   Train class counts (before SMOTE):")
-print(pd.Series(y_train).map(lambda x: label_map[x]).value_counts())
 
 # ---------------- SMOTE on TRAIN only ----------------
 print("\n✨ Applying SMOTE on training set only...")
 smote = SMOTE(random_state=SMOTE_RANDOM)
 X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
 print("   After SMOTE class counts:")
-print(pd.Series(y_train_res).map(lambda x: label_map[x]).value_counts())
+print(pd.Series(y_train_res).value_counts())
 
 # ---------------- Scaling ----------------
 print("\n⚖ Fitting RobustScaler on training set...")
@@ -127,81 +199,97 @@ X_train_s = scaler.fit_transform(X_train_res)
 X_test_s = scaler.transform(X_test)
 
 joblib.dump(scaler, os.path.join(OUTPUT_DIR, "scaler.pkl"))
+print("✅ scaler saved to", os.path.join(OUTPUT_DIR, "scaler.pkl"))
+
+# ---------------- Label encoder (for mapping to strings) ----------------
+# We have binary 0/1 — but create a label encoder for consistency
+label_encoder = LabelEncoder()
+label_encoder.fit([0,1])
 joblib.dump(label_encoder, os.path.join(OUTPUT_DIR, "label_encoder.pkl"))
+
+label_map = {0: "No_Disease", 1: "Disease"}
 with open(os.path.join(OUTPUT_DIR, "label_mapping.json"), "w") as f:
     json.dump(label_map, f, indent=2)
-print("✅ Saved scaler, label_encoder and label_mapping.json in", OUTPUT_DIR)
+print("✅ label mapping saved")
 
-# ---------------- Models ----------------
-print("\n🚀 Preparing models (class-weight aware where supported)...")
+# ---------------- Models --------------------------------
+print("\n🚀 Preparing candidate models...")
 models = {
-    "RandomForest": RandomForestClassifier(n_estimators=300, random_state=RANDOM_STATE, class_weight='balanced'),
-    "LogisticRegression": LogisticRegression(max_iter=3000, class_weight='balanced', solver='liblinear'),
-    "SVM": SVC(probability=True, class_weight='balanced'),
-    "MLP": MLPClassifier(hidden_layer_sizes=(128,64), max_iter=1500, random_state=RANDOM_STATE)
+    "RandomForest": RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, class_weight='balanced'),
+    "LogisticRegression": LogisticRegression(max_iter=2000, class_weight='balanced', solver='liblinear'),
+    "XGBoost": XGBClassifier(
+        n_estimators=200,
+        learning_rate=0.05,
+        max_depth=4,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric='logloss',
+        random_state=RANDOM_STATE
+    )
 }
-
-skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+skf = StratifiedKFold(n_splits=min(N_SPLITS, max(2, int(len(y_train_res) / 10))), shuffle=True, random_state=RANDOM_STATE)
 
 best_model = None
 best_name = None
 best_test_acc = -1.0
+model_perfs = []
 
 for idx, (name, model) in enumerate(models.items(), start=1):
-    print(f"\n[{idx}/{len(models)}] Training {name}")
-    fold_scores = []
-    fold_no = 1
-    for train_idx, val_idx in skf.split(X_train_s, y_train_res):
-        print(f"   • Fold {fold_no} ...", end=" ")
-        t0 = time.time()
-        model.fit(X_train_s[train_idx], y_train_res.iloc[train_idx])
-        score = model.score(X_train_s[val_idx], y_train_res.iloc[val_idx])
-        t1 = time.time()
-        fold_scores.append(score)
-        print(f"Acc: {score:.4f} | time: {t1-t0:.2f}s")
-        fold_no += 1
+    print(f"\n[{idx}/{len(models)}] Training {name} ...")
+    try:
+        # Train on augmented training set
+        model.fit(X_train_s, y_train_res)
+        # Evaluate on test
+        y_pred = model.predict(X_test_s)
+        acc_test = accuracy_score(y_test, y_pred)
+        print(f"   -> Test accuracy: {acc_test:.4f}")
+        model_perfs.append((name, model, acc_test))
+        # Save confusion matrix + report
+        print("   Classification report:")
+        print(classification_report(y_test, y_pred, target_names=["No_Disease","Disease"]))
 
-    mean_cv = np.mean(fold_scores)
-    print(f"   -> CV mean accuracy: {mean_cv:.4f}")
+        cm = confusion_matrix(y_test, y_pred)
+        plt.figure(figsize=(5,4))
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=["No","Yes"], yticklabels=["No","Yes"])
+        plt.title(f"{name} - Test Confusion Matrix")
+        plt.tight_layout()
+        cm_path = os.path.join(OUTPUT_DIR, f"{name}_confusion.png")
+        plt.savefig(cm_path)
+        plt.close()
+        print("   Confusion matrix saved to:", cm_path)
 
-    # Evaluate on test
-    y_pred = model.predict(X_test_s)
-    acc_test = accuracy_score(y_test, y_pred)
-    print(f"   -> Test accuracy: {acc_test:.4f}")
-    print("   Classification report (test set):")
-    print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
-
-    # Save confusion matrix
-    cm = confusion_matrix(y_test, y_pred)
-    plt.figure(figsize=(6,5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
-    plt.title(f"{name} - Test Confusion Matrix")
-    plt.tight_layout()
-    cm_path = os.path.join(OUTPUT_DIR, f"{name}_confusion.png")
-    plt.savefig(cm_path)
-    plt.close()
-    print("   Confusion matrix saved to:", cm_path)
-
-    if acc_test > best_test_acc:
-        best_test_acc = acc_test
-        best_model = model
-        best_name = name
+        if acc_test > best_test_acc:
+            best_test_acc = acc_test
+            best_model = model
+            best_name = name
+    except Exception as e:
+        print(f"   Training {name} failed: {e}")
 
 print("\n🏆 Best model:", best_name, "| Test Accuracy:", best_test_acc)
 
-# ---------------- Calibrate probabilities ----------------
-print("\n🔧 Calibrating probabilities (CalibratedClassifierCV with sigmoid)...")
+# Choose alt model (second best) if available
+model_perfs_sorted = sorted(model_perfs, key=lambda x: x[2], reverse=True)
+if len(model_perfs_sorted) >= 2:
+    alt_name, alt_model, alt_acc = model_perfs_sorted[1]
+    print("Second-best candidate:", alt_name, alt_acc)
+else:
+    alt_model = None
+
+# Calibrate the best model probabilities if possible
+print("\n🔧 Calibrating probabilities (if applicable)...")
 try:
-    calib = CalibratedClassifierCV(best_model, cv=3, method='sigmoid')
-    calib.fit(X_train_s, y_train_res)
-    final_model = calib
-    print("   Calibration successful.")
+    if best_model is not None:
+        calib = CalibratedClassifierCV(best_model, cv=3, method='sigmoid')
+        calib.fit(X_train_s, y_train_res)
+        final_model = calib
+        print("   Calibration successful.")
+    else:
+        raise RuntimeError("No best model found.")
 except Exception as e:
     print("   Calibration failed, using raw best model. Error:", e)
     final_model = best_model
 
-# ---------------- Final evaluation ----------------
+# Final evaluation
 y_pred_final = final_model.predict(X_test_s)
 if hasattr(final_model, "predict_proba"):
     probs = final_model.predict_proba(X_test_s).max(axis=1)
@@ -210,14 +298,13 @@ else:
 
 test_acc_final = accuracy_score(y_test, y_pred_final)
 print("\n📍 Final Test Accuracy:", test_acc_final)
-print("📍 Classification report (final):")
-print(classification_report(y_test, y_pred_final, target_names=label_encoder.classes_))
+print("📍 Final classification report:")
+print(classification_report(y_test, y_pred_final, target_names=["No_Disease","Disease"]))
 
 # Save final confusion matrix
 cm_final = confusion_matrix(y_test, y_pred_final)
 plt.figure(figsize=(6,5))
-sns.heatmap(cm_final, annot=True, fmt="d", cmap="Purples",
-            xticklabels=label_encoder.classes_, yticklabels=label_encoder.classes_)
+sns.heatmap(cm_final, annot=True, fmt="d", cmap="Purples", xticklabels=["No","Yes"], yticklabels=["No","Yes"])
 plt.title(f"Final Model ({best_name}) Confusion Matrix")
 plt.tight_layout()
 final_cm_path = os.path.join(OUTPUT_DIR, f"final_confusion_{best_name}.png")
@@ -228,6 +315,12 @@ print("Saved final confusion matrix to:", final_cm_path)
 # ---------------- Save artifacts ----------------
 print("\n💾 Saving artifacts for deployment...")
 joblib.dump(final_model, os.path.join(OUTPUT_DIR, "best_hcv_model.pkl"))
+print("Saved best model to:", os.path.join(OUTPUT_DIR, "best_hcv_model.pkl"))
+
+if alt_model is not None:
+    joblib.dump(alt_model, os.path.join(OUTPUT_DIR, "alt_model.pkl"))
+    print("Saved alt model to:", os.path.join(OUTPUT_DIR, "alt_model.pkl"))
+
 joblib.dump(scaler, os.path.join(OUTPUT_DIR, "scaler.pkl"))
 joblib.dump(label_encoder, os.path.join(OUTPUT_DIR, "label_encoder.pkl"))
 joblib.dump(feature_order, os.path.join(OUTPUT_DIR, "feature_order.pkl"))
@@ -235,13 +328,13 @@ joblib.dump(feature_order, os.path.join(OUTPUT_DIR, "feature_order.pkl"))
 with open(os.path.join(OUTPUT_DIR, "label_mapping.json"), "w") as f:
     json.dump(label_map, f, indent=2)
 
-print("Saved: best_hcv_model.pkl, scaler.pkl, label_encoder.pkl, feature_order.pkl, label_mapping.json")
+print("Saved scaler, label_encoder, feature_order and label_mapping.json in", OUTPUT_DIR)
 
 # ---------------- Save test results CSV for admin UI ----------------
 print("\n📝 Producing model_test_results.csv and test_data_sample.csv for UI validation...")
 test_results = X_test.copy()
-test_results['Actual_Label'] = label_encoder.inverse_transform(y_test)
-test_results['Predicted_Label'] = label_encoder.inverse_transform(y_pred_final)
+test_results['Actual_Label'] = y_test.map({0:"No_Disease",1:"Disease"})
+test_results['Predicted_Label'] = pd.Series(y_pred_final).map({0:"No_Disease",1:"Disease"})
 test_results['Probability'] = probs
 test_results['Correct'] = test_results['Actual_Label'] == test_results['Predicted_Label']
 
@@ -252,7 +345,7 @@ print("Saved:", test_results_path)
 # Also save the raw test sample for admin UI (patient_id generator)
 test_sample = X_test.copy()
 test_sample.insert(0, 'patient_id', range(1001, 1001 + len(test_sample)))
-test_sample['true_label'] = label_encoder.inverse_transform(y_test)
+test_sample['true_label'] = y_test.map({0:"No_Disease",1:"Disease"})
 test_sample_path = os.path.join(OUTPUT_DIR, "test_data_sample.csv")
 test_sample.to_csv(test_sample_path, index=False)
 print("Saved:", test_sample_path, "| rows:", len(test_sample))
@@ -272,10 +365,12 @@ c.drawString(50, 685, f"CV folds: {N_SPLITS}")
 c.drawString(50, 670, f"Dataset shape (after cleaning): {df.shape}")
 
 if os.path.exists(final_cm_path):
-    c.drawImage(final_cm_path, 50, 350, width=480, preserveAspectRatio=True)
+    try:
+        c.drawImage(final_cm_path, 50, 350, width=480, preserveAspectRatio=True)
+    except Exception:
+        pass
 
-# Add small classification report text
-report_str = classification_report(y_test, y_pred_final, target_names=label_encoder.classes_)
+report_str = classification_report(y_test, y_pred_final, target_names=["No_Disease","Disease"])
 c.setFont("Helvetica", 9)
 ypos = 320
 for line in report_str.splitlines():
@@ -287,5 +382,4 @@ for line in report_str.splitlines():
 
 c.save()
 print("Saved PDF report:", report_name)
-
 print("\n🎉 Training finished. Artifacts in:", OUTPUT_DIR)

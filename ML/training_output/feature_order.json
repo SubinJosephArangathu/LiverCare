@@ -1,14 +1,10 @@
 [
   "Age",
-  "Sex",
+  "Gender",
+  "Alkphos",
+  "Sgpt",
+  "Sgot",
+  "TP",
   "ALB",
-  "ALP",
-  "ALT",
-  "AST",
-  "BIL",
-  "CHE",
-  "CHOL",
-  "CREA",
-  "GGT",
-  "PROT"
+  "A_G"
 ]

@@ -11,31 +11,47 @@ if(!is_admin()){
 
 $pdo = getPDO();
 
+/* ----------------------------------------------------
+   AJAX MODE — return dataset for admin dashboard charts
+------------------------------------------------------*/
 if(!empty($_GET['ajax'])){
-    // Fetch all predictions
-    $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at ASC")->fetchAll(PDO::FETCH_ASSOC);
+    $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at ASC")
+                ->fetchAll(PDO::FETCH_ASSOC);
 
     $labelCounts = [];
     $genderCounts = ['Male'=>0,'Female'=>0,'Unknown'=>0];
-    $riskCounts = ['Low'=>0,'Medium'=>0,'High'=>0];
+    $riskCounts = ['Low'=>0,'Moderate'=>0,'High'=>0];
     $topFactors = [];
     $patients = [];
 
     foreach($rows as $r){
+
+        // Decrypt values
         $patientId = decrypt_data($r['patient_id']);
         $genderVal = decrypt_data($r['gender'] ?? '');
         $prediction = decrypt_data($r['predicted_label'] ?? '');
-        $probability = floatval($r['probability']);
+        
+        // ---------------------------
+        // NEW FIELD: probability_primary
+        // fallback to old field: probability
+        // ---------------------------
+        $probability = floatval($r['probability_primary'] 
+                            ?? $r['probability'] 
+                            ?? 0);
+
         $riskLevel = $r['risk_level'] ?? 'Unknown';
         $createdAt = $r['created_at'];
         $age = decrypt_data($r['age'] ?? '');
 
-        if (!in_array($genderVal, ['Male','Female','Unknown'])) $genderVal = 'Unknown';
+        if (!in_array($genderVal, ['Male','Female','Unknown']))
+            $genderVal = 'Unknown';
 
+        // Count labels & genders
         $labelCounts[$prediction] = ($labelCounts[$prediction] ?? 0) + 1;
         $genderCounts[$genderVal]++;
         if(isset($riskCounts[$riskLevel])) $riskCounts[$riskLevel]++;
 
+        // TOP FACTORS LOGIC
         if(!empty($r['top_factors'])){
             $factorsArr = json_decode($r['top_factors'], true);
             if(is_array($factorsArr)){
@@ -46,6 +62,7 @@ if(!empty($_GET['ajax'])){
             }
         }
 
+        // Push into dataset
         $patients[] = [
             'id' => $patientId,
             'age' => $age,
@@ -61,19 +78,25 @@ if(!empty($_GET['ajax'])){
     $topFactors = array_slice($topFactors, 0, 10);
 
     echo json_encode([
-        'labels' => array_keys($labelCounts),
-        'counts' => array_values($labelCounts),
-        'genderLabels' => array_keys($genderCounts),
-        'genderCounts' => array_values($genderCounts),
-        'riskCounts' => $riskCounts,
-        'topFactors' => $topFactors,
-        'patients' => $patients
+        "labels" => array_keys($labelCounts),
+        "counts" => array_values($labelCounts),
+        "genderLabels" => array_keys($genderCounts),
+        "genderCounts" => array_values($genderCounts),
+        "riskCounts" => $riskCounts,
+        "topFactors" => $topFactors,
+        "patients" => $patients
     ]);
     exit;
 }
 
-// Non-AJAX fallback table
-$rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at DESC LIMIT 200")->fetchAll(PDO::FETCH_ASSOC);
+
+/* ----------------------------------------------------
+   NON-AJAX MODE — table rendering
+------------------------------------------------------*/
+$rows = $pdo->query("
+    SELECT * FROM predictions 
+    ORDER BY created_at DESC LIMIT 200
+")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!doctype html>
@@ -83,15 +106,18 @@ $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at DESC LIMIT 20
   <title>Admin - Predictions</title>
   <link rel="stylesheet" href="assets/css/style.css">
 </head>
+
 <body>
   <div class="sidebar">
     <a href="/admin_dashboard.php">Dashboard</a>
-    <a href="/admin_predictions.php">Predictions</a>
+    <a href="/admin_predictions.php" class="active">Predictions</a>
     <a href="/admin_users.php">Users</a>
     <a href="/logout.php">Logout</a>
   </div>
+
   <div class="content">
     <h2>Recent Predictions</h2>
+
     <div class="data-table-container">
       <table class="data-table display nowrap" style="width:100%">
         <thead>
@@ -100,28 +126,39 @@ $rows = $pdo->query("SELECT * FROM predictions ORDER BY created_at DESC LIMIT 20
             <th>Patient</th>
             <th>Age</th>
             <th>Gender</th>
-            <th>Label</th>
-            <th>Probability</th>
+            <th>Prediction</th>
+            <th>Primary Prob</th>
+            <th>Final Confidence</th>
             <th>Risk Level</th>
-            <th>User</th>
             <th>Created</th>
           </tr>
         </thead>
+
         <tbody>
-          <?php foreach($rows as $r): ?>
+        <?php foreach($rows as $r): ?>
+            <?php
+                $patient_id = decrypt_data($r['patient_id']);
+                $age = decrypt_data($r['age'] ?? '');
+                $gender = decrypt_data($r['gender'] ?? '');
+                $prediction = decrypt_data($r['predicted_label']);
+                
+                $prob_primary = $r['probability_primary'] ?? $r['probability'] ?? 0;
+                $confidence_final = $r['confidence_final'] ?? null;
+            ?>
           <tr>
             <td><?=htmlspecialchars($r['id'])?></td>
-            <td><?=htmlspecialchars(decrypt_data($r['patient_id']))?></td>
-            <td><?=htmlspecialchars(decrypt_data($r['age'] ?? ''))?></td>
-            <td><?=htmlspecialchars(decrypt_data($r['gender'] ?? ''))?></td>
-            <td><?=htmlspecialchars(decrypt_data($r['predicted_label']))?></td>
-            <td><?=htmlspecialchars($r['probability'])?></td>
+            <td><?=htmlspecialchars($patient_id)?></td>
+            <td><?=htmlspecialchars($age)?></td>
+            <td><?=htmlspecialchars($gender)?></td>
+            <td><?=htmlspecialchars($prediction)?></td>
+            <td><?=number_format((float)$prob_primary, 3)?></td>
+            <td><?= $confidence_final !== null ? number_format($confidence_final, 3) : '—' ?></td>
             <td><?=htmlspecialchars($r['risk_level'] ?? '')?></td>
-            <td><?=htmlspecialchars($r['user_id'])?></td>
             <td><?=htmlspecialchars($r['created_at'])?></td>
           </tr>
-          <?php endforeach; ?>
+        <?php endforeach; ?>
         </tbody>
+
       </table>
     </div>
   </div>
@@ -148,5 +185,6 @@ $(document).ready(function () {
     });
 });
 </script>
+
 </body>
 </html>

@@ -1,7 +1,4 @@
 {
-  "0": "0=Blood Donor",
-  "1": "0s=suspect Blood Donor",
-  "2": "1=Hepatitis",
-  "3": "2=Fibrosis",
-  "4": "3=Cirrhosis"
+  "0": "No_Disease",
+  "1": "Disease"
 }

@@ -1,12 +1,14 @@
-# app.py — LiverCare AI API with second opinion logic
+#!/usr/bin/env python3
+# app.py — LiverCare API (Enhanced: friendly labels, professional risk scale, true confidence)
 from flask import Flask, request, jsonify
-import joblib, os, numpy as np, traceback, json, hashlib, time, warnings
-
+import os, time, json, hashlib, traceback
+import joblib
+import numpy as np
+import warnings
+from math import log
 warnings.filterwarnings("ignore")
 
-# -----------------------------
 # Optional SHAP import
-# -----------------------------
 try:
     import shap
     SHAP_AVAILABLE = True
@@ -17,99 +19,107 @@ except Exception:
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
-# -----------------------------
-# Paths and model loading
-# -----------------------------
+# ---------------- Config ----------------
 MODEL_DIR = os.environ.get("MODEL_DIR", "training_output")
-
 MODEL_PATH = os.path.join(MODEL_DIR, "best_hcv_model.pkl")
-SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
-LABEL_ENCODER_PATH = os.path.join(MODEL_DIR, "label_encoder.pkl")
-FEATURE_ORDER_PATH = os.path.join(MODEL_DIR, "feature_order.pkl")
 ALT_MODEL_PATH = os.path.join(MODEL_DIR, "alt_model.pkl")
+SCALER_PATH = os.path.join(MODEL_DIR, "scaler.pkl")
+FEATURE_ORDER_PATH = os.path.join(MODEL_DIR, "feature_order.pkl")
+LABEL_ENCODER_PATH = os.path.join(MODEL_DIR, "label_encoder.pkl")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "v1.0")
 
+# ---------------- Load artifacts ----------------
 if not os.path.exists(MODEL_PATH):
     raise FileNotFoundError(f"Model not found at {MODEL_PATH}")
 
 best_model = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
-label_encoder = joblib.load(LABEL_ENCODER_PATH)
-feature_order = joblib.load(FEATURE_ORDER_PATH)
 alt_model = joblib.load(ALT_MODEL_PATH) if os.path.exists(ALT_MODEL_PATH) else None
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "v1.0")
+scaler = joblib.load(SCALER_PATH) if os.path.exists(SCALER_PATH) else None
+feature_order = joblib.load(FEATURE_ORDER_PATH) if os.path.exists(FEATURE_ORDER_PATH) else None
+label_encoder = joblib.load(LABEL_ENCODER_PATH) if os.path.exists(LABEL_ENCODER_PATH) else None
 
-# -----------------------------
-# SHAP Explainer initialization
-# -----------------------------
+print("✅ Artifacts loaded. Feature order:", feature_order)
+
+# SHAP lazy init
 _shap_explainer = None
 _shap_last_init = 0
-
 def get_shap_explainer():
-    """Lazily initialize SHAP explainer."""
     global _shap_explainer, _shap_last_init
     if _shap_explainer is not None:
         return _shap_explainer
-
-    now = time.time()
-    if _shap_last_init and (now - _shap_last_init) < 10:
-        return _shap_explainer
-    _shap_last_init = now
-
     if not SHAP_AVAILABLE:
-        print("⚠️ SHAP not available — skipping explainer initialization.")
+        print("SHAP not available.")
         return None
-
     try:
+        # safer masker: zeros with shape (1, n_features) — ideally use training sample
         masker = shap.maskers.Independent(np.zeros((1, len(feature_order))))
-
-        def model_predict_proba(X):
-            X_scaled = scaler.transform(X)
+        def model_predict(X):
+            Xs = scaler.transform(X)
             if hasattr(best_model, "predict_proba"):
-                return best_model.predict_proba(X_scaled)
+                return best_model.predict_proba(Xs)
             try:
-                df = best_model.decision_function(X_scaled)
+                df = best_model.decision_function(Xs)
                 if df.ndim == 1:
-                    probs_pos = 1.0 / (1.0 + np.exp(-df))
-                    return np.vstack([1 - probs_pos, probs_pos]).T
+                    prob_pos = 1.0 / (1.0 + np.exp(-df))
+                    return np.vstack([1-prob_pos, prob_pos]).T
                 return df
-            except Exception:
-                return np.zeros((X.shape[0], 2))
-
-        _shap_explainer = shap.Explainer(model_predict_proba, masker)
-        print("✅ SHAP explainer initialized successfully.")
+            except:
+                return np.zeros((X.shape[0],2))
+        _shap_explainer = shap.Explainer(model_predict, masker)
+        print("SHAP explainer initialized.")
         return _shap_explainer
-
     except Exception as e:
-        print("❌ Failed to create SHAP explainer:", e)
+        print("Failed SHAP init:", e)
+        _shap_explainer = None
         return None
 
-# -----------------------------
-# Utility functions
-# -----------------------------
-def normalize_sex_value(v):
-    if v is None:
-        return None
+# ---------------- Helper utilities ----------------
+def normalize_gender(v):
+    if v is None: return None
     s = str(v).strip().lower()
-    if s in ['m', 'male', '1', 'true', 't', 'yes', 'y']:
-        return 1
-    if s in ['f', 'female', '0', 'false', 'n', 'no']:
-        return 0
+    if s.startswith('m'): return 1
+    if s.startswith('f'): return 0
     try:
-        return 1 if int(float(s)) == 1 else 0
+        iv = int(float(s))
+        return 1 if iv == 1 else 0
     except:
         return None
 
-def compute_risk_level(prob):
-    if prob >= 0.85:
-        return "Low"
-    if prob >= 0.65:
-        return "Moderate"
-    return "High"
+def safe_get_ag_ratio(data):
+    # accept multiple variants from frontends: "A/G Ratio", "A_G", "AG_Ratio", "AGRatio"
+    for k in ["A/G Ratio", "A_G", "AG_Ratio", "AGRatio", "A_G_Ratio"]:
+        if k in data:
+            try:
+                return float(data[k])
+            except:
+                return 0.0
+    return 0.0
+
+def calculate_entropy(proba):
+    # proba is iterable of class probabilities, sum ~1
+    entropy = -sum([p * log(p + 1e-12) for p in proba])
+    max_entropy = log(2)  # for binary
+    return float(entropy / max_entropy)
+
+def model_agreement_score(primary_conf, secondary_conf):
+    if secondary_conf is None:
+        return 0.5
+    return 1.0 - abs(primary_conf - secondary_conf)
+
+def shap_support_strength(shap_vals):
+    if not shap_vals:
+        return 0.5
+    try:
+        avg_abs = np.mean([abs(v["impact"]) for v in shap_vals])
+        return float(min(1.0, avg_abs / 1.0))
+    except:
+        return 0.5
 
 def interpret_factor(feature, impact):
     try:
+        impact = float(impact)
         trend = "increased the likelihood of disease" if impact > 0 else "reduced the likelihood of disease"
-        strength = abs(float(impact))
+        strength = abs(impact)
         if strength > 0.5:
             level = "strongly"
         elif strength > 0.2:
@@ -117,178 +127,320 @@ def interpret_factor(feature, impact):
         else:
             level = "slightly"
         return f"{feature} {level} {trend} (impact: {impact:.3f})"
-    except Exception:
-        return f"{feature} had an impact of {impact}"
+    except:
+        return f"{feature} impact {impact}"
 
-# -----------------------------
-# SHAP / Top Factor Extraction
-# -----------------------------
-def compute_top_factors_shap(X_np):
+def compute_top_factors(X_np):
     try:
-        X_np = np.asarray(X_np).reshape(1, -1)
-    except Exception:
+        X_np = np.asarray(X_np)
+        if X_np.ndim == 1:
+            X_np = X_np.reshape(1, -1)
+    except:
         return []
-
     explainer = get_shap_explainer()
     if explainer is not None:
         try:
-            shap_values_obj = explainer(X_np)
-            vals = getattr(shap_values_obj, "values", None) or getattr(shap_values_obj, "shap_values", None)
+            ev = explainer(X_np)
+            vals = getattr(ev, "values", None) or getattr(ev, "shap_values", None)
             if vals is None:
-                raise ValueError("No SHAP values found")
-
+                raise RuntimeError("No shap values")
             if isinstance(vals, list):
-                vals = np.array(vals[0])
-
-            shap_vals = np.array(vals).reshape(-1)
+                vals_arr = np.asarray(vals[0])
+            else:
+                vals_arr = np.asarray(vals)
+            shap_vals = vals_arr.reshape(1, -1)[0]
             pairs = list(zip(feature_order, shap_vals))
             top = sorted(pairs, key=lambda x: abs(x[1]), reverse=True)[:3]
             return [{"feature": f, "impact": float(v), "explanation": interpret_factor(f, v)} for f, v in top]
         except Exception as e:
-            print("⚠️ SHAP explanation failed:", e)
-
-    # Fallback using scaled values
+            # fall through to fallback
+            print("SHAP computation failed:", e)
+    # fallback: scaled magnitudes
     try:
-        X_scaled = scaler.transform(X_np)
-        vals = X_scaled.squeeze()
+        Xs = scaler.transform(X_np)
+        vals = Xs.squeeze()
         idxs = np.argsort(np.abs(vals))[::-1][:3]
-        return [
-            {"feature": feature_order[i], "impact": float(vals[i]), "explanation": interpret_factor(feature_order[i], vals[i])}
-            for i in idxs
-        ]
+        return [{"feature": feature_order[i], "impact": float(vals[i]), "explanation": interpret_factor(feature_order[i], vals[i])} for i in idxs]
     except Exception as e:
-        print("⚠️ Fallback top-factors failed:", e)
+        print("Fallback top factors failed:", e)
         return []
 
-def generate_explanation_text(top_factors, pred_label, risk_level, probability):
-    try:
-        if not top_factors:
-            return f"The model predicted {pred_label} with {risk_level} risk (confidence {probability*100:.2f}%)."
-        factors_str = " ".join(
-            f.get("explanation", interpret_factor(f.get("feature", "?"), f.get("impact", 0)))
-            for f in top_factors
-        )
-        return f"The model predicted {pred_label} with {risk_level} risk (confidence {probability*100:.2f}%). {factors_str}"
-    except Exception as e:
-        print("generate_explanation_text error:", e)
-        return f"The model predicted {pred_label} with {risk_level} risk (confidence {probability*100:.2f}%)."
+# map numeric label -> human-friendly string
+LABEL_MAP = {0: "No Liver Disease", 1: "Liver Disease"}
 
-# -----------------------------
-# API ROUTES
-# -----------------------------
+def get_class_index_for_value(model, value=1):
+    # Try to find the column index for class value (e.g., 1)
+    if hasattr(model, "classes_"):
+        try:
+            classes = list(model.classes_)
+            return classes.index(value)
+        except Exception:
+            pass
+    # fallback: assume index 1 corresponds to class 1
+    return 1
+
+def compute_risk_label(pred_index, disease_prob):
+    """
+    pred_index: the predicted class index (0 or 1)
+    disease_prob: probability assigned to class 'disease' (class 1)
+    returns human risk level string
+    """
+    pred_label = LABEL_MAP.get(pred_index, str(pred_index))
+    if pred_index == 0:
+        # No Liver Disease: use healthy_prob = 1 - disease_prob
+        healthy_prob = 1.0 - disease_prob
+        if healthy_prob > 0.85:
+            return "Low"
+        if healthy_prob >= 0.60:
+            return "Medium"
+        return "Borderline"
+    else:
+        # Liver Disease: use disease_prob to judge severity
+        if disease_prob < 0.50:
+            # unlikely, but if predicted 1 with low prob, mark Borderline
+            return "Borderline"
+        if disease_prob < 0.70:
+            return "Mild"
+        if disease_prob < 0.90:
+            return "Moderate"
+        return "High"
+
+# ---------------- Routes ----------------
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"message": "LiverCare API running", "model_version": MODEL_VERSION}), 200
+    return jsonify({"message":"LiverCare API running", "model_version": MODEL_VERSION}), 200
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
     try:
         data = request.get_json(force=True, silent=True)
         if not data:
-            return jsonify({"error": "Invalid JSON"}), 400
+            return jsonify({"success": False, "error": "Invalid JSON"}), 400
 
-        patient_id = data.get("patient_id", "").strip()
-        if not patient_id:
-            return jsonify({"error": "Missing patient_id"}), 400
-
-        # Build feature array
-        x_vals = []
+        # build feature vector from feature_order (accept multiple names)
         missing = []
+        x_vals = []
         for feat in feature_order:
-            if feat not in data:
-                missing.append(feat)
+            # accept alternative names for A/G
+            if feat in data:
+                raw = data[feat]
             else:
-                val = data[feat]
-                if feat.lower() in ["sex", "gender"]:
-                    v = normalize_sex_value(val)
-                    if v is None:
-                        return jsonify({"error": f"Invalid gender for {feat}: {val}"}), 400
-                    x_vals.append(float(v))
+                # variations
+                alt = None
+                if feat in ["A_G", "A/G", "A/G Ratio", "A_G_Ratio", "AG_Ratio", "AGRatio"]:
+                    alt = data.get("A/G Ratio") or data.get("A_G") or data.get("AG_Ratio") or data.get("AGRatio") or data.get("A_G_Ratio")
+                elif feat.lower() in ["gender","sex"]:
+                    alt = data.get("Gender") or data.get("gender") or data.get("Sex") or data.get("sex")
                 else:
+                    alt = data.get(feat)
+                raw = alt
+            if raw is None:
+                missing.append(feat)
+                continue
+            # special handling for gender
+            if str(feat).lower() in ["gender","sex"]:
+                g = normalize_gender(raw)
+                if g is None:
+                    return jsonify({"success": False, "error": f"Invalid gender value for {feat}: {raw}"}), 400
+                x_vals.append(float(g))
+            else:
+                try:
+                    x_vals.append(float(raw))
+                except Exception:
+                    return jsonify({"success": False, "error": f"Field {feat} must be numeric. Got: {raw}"}), 400
+
+        # Accept a few common alternate short-circuits: if missing only A/G variations, try combined getter
+        if missing:
+            # if A/G is the only missing and provided under other keys, handle that
+            # attempt to map a common AG key names from data directly
+            ag_keys = ["A/G Ratio","A_G","AG_Ratio","AGRatio","A_G_Ratio"]
+            if set(missing) == {"A_G"} or set(missing) == set([k for k in missing if "A_G" in k or "A/G" in k]):
+                found = None
+                for k in ag_keys:
+                    if k in data:
+                        try:
+                            found = float(data[k])
+                        except:
+                            found = None
+                        break
+                if found is not None:
+                    # replace the missing A_G with value
                     try:
-                        x_vals.append(float(val))
-                    except Exception:
-                        return jsonify({"error": f"Field {feat} must be numeric. Got: {val}"}), 400
+                        idx = feature_order.index("A_G")
+                        x_vals.insert(idx, float(found))
+                        missing = [m for m in missing if m != "A_G"]
+                    except ValueError:
+                        pass
 
         if missing:
-            return jsonify({"error": f"Missing required fields: {missing}"}), 400
+            return jsonify({"success": False, "error": f"Missing required fields: {missing}"}), 400
 
         X = np.array(x_vals).reshape(1, -1)
-        X_scaled = scaler.transform(X)
+        if scaler is not None:
+            Xs = scaler.transform(X)
+        else:
+            Xs = X
 
-        # Predict
-        pred_enc = best_model.predict(X_scaled)[0]
-        try:
-            pred_label = label_encoder.inverse_transform([pred_enc])[0]
-        except Exception:
-            pred_label = str(pred_enc)
-
+        # Primary prediction
         if hasattr(best_model, "predict_proba"):
-            probability = float(np.max(best_model.predict_proba(X_scaled)[0]))
+            probs = best_model.predict_proba(Xs)[0]
         else:
             try:
-                logit = best_model.decision_function(X_scaled)[0]
-                probability = 1 / (1 + np.exp(-logit))
-            except Exception:
-                probability = 0.0
+                df_val = best_model.decision_function(Xs)[0]
+                if np.ndim(df_val) == 0:
+                    prob_pos = 1.0 / (1.0 + np.exp(-df_val))
+                    probs = np.array([1-prob_pos, prob_pos])
+                else:
+                    probs = df_val
+            except:
+                probs = np.array([0.5,0.5])
 
-        risk_level = compute_risk_level(probability)
-        top_factors = compute_top_factors_shap(X)
-        explanation_text = generate_explanation_text(top_factors, pred_label, risk_level, probability)
+        # Determine index for disease class (class value 1)
+        disease_index = get_class_index_for_value(best_model, 1)
+        # probability of disease
+        try:
+            disease_prob = float(probs[disease_index])
+        except:
+            # fallback: if probs len==2 assume index 1
+            disease_prob = float(probs[1]) if len(probs) > 1 else float(np.max(probs))
 
-        # -----------------------------
-        # Second opinion logic
-        # -----------------------------
-        second_opinion = None
-        if probability < 0.7:  # low confidence case
-            if alt_model is not None:
-                try:
-                    alt_pred_enc = alt_model.predict(X_scaled)[0]
-                    alt_label = label_encoder.inverse_transform([alt_pred_enc])[0]
-                    alt_prob = float(np.max(alt_model.predict_proba(X_scaled)[0]))
-                    second_opinion = {
+        pred_idx = int(np.argmax(probs))
+        # Map to label strings using LABEL_MAP (0/1)
+        pred_label_str = LABEL_MAP.get(pred_idx, str(pred_idx))
+
+        # compute basic confidence (max probability)
+        primary_conf = float(np.max(probs))
+
+        # SHAP top factors
+        top_factors = compute_top_factors(X)
+
+        # Entropy / uncertainty based confidence component
+        entropy_uncertainty = calculate_entropy(probs)
+        entropy_confidence = 1 - entropy_uncertainty
+
+        # Second opinion: ALWAYS run alt_model if available (for testing & full comparison)
+        secondary_conf = None
+        secondary_probs = None
+        second_opinion_obj = None
+        SECOND_OP_THRESHOLD = 0.70  # used for medical_warning only
+        if primary_conf < SECOND_OP_THRESHOLD and alt_model is not None:
+            try:
+                if hasattr(alt_model, "predict_proba"):
+                    secondary_probs = alt_model.predict_proba(Xs)[0]
+                else:
+                    try:
+                        df_val2 = alt_model.decision_function(Xs)[0]
+                        if np.ndim(df_val2) == 0:
+                            ppos = 1.0 / (1.0 + np.exp(-df_val2))
+                            secondary_probs = np.array([1-ppos, ppos])
+                        else:
+                            secondary_probs = df_val2
+                    except:
+                        secondary_probs = None
+                if secondary_probs is not None:
+                    # find disease prob index for alt_model
+                    sec_disease_idx = get_class_index_for_value(alt_model, 1)
+                    try:
+                        secondary_conf = float(np.max(secondary_probs))
+                        secondary_disease_prob = float(secondary_probs[sec_disease_idx])
+                    except:
+                        secondary_conf = float(np.max(secondary_probs))
+                        secondary_disease_prob = None
+                    sec_pred_idx = int(np.argmax(secondary_probs))
+                    sec_label_str = LABEL_MAP.get(sec_pred_idx, str(sec_pred_idx))
+                    second_opinion_obj = {
                         "model": "alt_model",
-                        "prediction": alt_label,
-                        "probability": alt_prob
+                        "prediction": sec_label_str,
+                        "probability": secondary_disease_prob if secondary_disease_prob is not None else secondary_conf
                     }
-                except Exception as e:
-                    print("⚠️ Second opinion model failed:", e)
-                    second_opinion = {"note": "Alt model failed to generate second opinion"}
-            else:
-                second_opinion = {"note": "Confidence below 70%. Please verify with a medical professional."}
+            except Exception as e:
+                second_opinion_obj = {"error": str(e)}
+                secondary_conf = None
 
-        # Hash for auditing
-        payload_hash = hashlib.sha256(json.dumps({
-            "patient_id": patient_id,
-            "prediction": pred_label,
-            "probability": probability,
-            "risk_level": risk_level
-        }, sort_keys=True).encode()).hexdigest()
+        # Model agreement and SHAP strength
+        agreement = model_agreement_score(primary_conf, secondary_conf)
+        shap_strength = shap_support_strength(top_factors)
 
-        # Final response
+        # Final combined confidence (weighted)
+        final_confidence = (
+            (primary_conf * 0.50) +
+            (entropy_confidence * 0.20) +
+            (agreement * 0.20) +
+            (shap_strength * 0.10)
+        )
+        final_confidence = float(max(0.0, min(1.0, final_confidence)))
+
+        # Compute risk label based on pred_idx and disease_prob
+        risk_label = compute_risk_label(pred_idx, disease_prob)
+
+        # Medical warning if both confidences < 0.70
+        medical_warning = None
+        if primary_conf < SECOND_OP_THRESHOLD:
+            if secondary_conf is None:
+                # alt model not available or failed
+                medical_warning = None
+            elif secondary_conf < SECOND_OP_THRESHOLD:
+                medical_warning = "Both predictions have low confidence. Please consult a doctor or medical expert for further evaluation."
+
+        # Food recommendations (simple rule)
+        disease_flag = (pred_idx == 1)
+        FOOD_RECOMMENDATIONS = {
+            "liver_friendly": [
+                "Leafy greens (spinach, kale)",
+                "High-fiber whole grains (oats, brown rice)",
+                "Lean proteins (chicken, fish)",
+                "Fresh fruits (berries, apples)",
+                "Healthy fats (olive oil, avocados)"
+            ],
+            "avoid": [
+                "Alcohol",
+                "High-fat fried foods",
+                "Sugary beverages and sweets",
+                "Processed meats",
+                "Excess salt"
+            ],
+            "notes": "General guidelines. Consult a medical professional for personalized advice."
+        }
+        food_recs = FOOD_RECOMMENDATIONS if disease_flag else {"note":"No disease predicted — general healthy diet recommended."}
+
+        # Build readable audit hash
+        payload_for_hash = {
+            "patient_id": data.get("patient_id", ""),
+            "features": dict(zip(feature_order, [float(x) for x in x_vals])),
+            "predicted_label": pred_label_str,
+            "disease_probability": disease_prob
+        }
+        payload_hash = hashlib.sha256(json.dumps(payload_for_hash, sort_keys=True).encode()).hexdigest()
+
+        # Build response
         response = {
             "success": True,
-            "prediction": pred_label,
-            "probability": probability,
-            "risk_level": risk_level,
+            "prediction": pred_label_str,
+            "prediction_index": pred_idx,
+            "probability_primary": primary_conf,
+            "disease_probability": disease_prob,
+            "risk_level": risk_label,
             "top_factors": top_factors,
-            "explanation_text": explanation_text,
-            "hash": payload_hash,
+            "explanation_text": f"The model predicted {pred_label_str} with {risk_label} risk and confidence of {primary_conf*100:.2f}%. " + " ".join([t.get("explanation","") for t in top_factors]),
+            "confidence_original": primary_conf,
+            "confidence_entropy_adjusted": entropy_confidence,
+            "confidence_model_agreement": agreement,
+            "confidence_shap_support": shap_strength,
+            "confidence_final": final_confidence,
+            "second_opinion": second_opinion_obj,
+            "medical_warning": medical_warning,
+            "food_recommendations": food_recs,
             "model_version": MODEL_VERSION,
-            "second_opinion": second_opinion
+            "hash": payload_hash
         }
 
-        print("✅ DEBUG response keys:", list(response.keys()))
         return jsonify(response), 200
 
     except Exception as e:
         tb = traceback.format_exc()
-        print("❌ Prediction Error:", e, tb)
-        return jsonify({"success": False, "error": str(e)}), 500
+        print("Prediction Error:", e, tb)
+        return jsonify({"success": False, "error": str(e), "trace": tb}), 500
 
-# -----------------------------
-# ENTRY POINT
-# -----------------------------
 if __name__ == "__main__":
-    print(f"🚀 Starting LiverCare Flask API (Model {MODEL_VERSION}) on port 5000")
+    print("Starting LiverCare API on port 5000 (model_version:", MODEL_VERSION, ")")
     app.run(host="0.0.0.0", port=5000)
