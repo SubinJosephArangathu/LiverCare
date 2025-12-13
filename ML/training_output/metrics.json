@@ -1,0 +1,7 @@
+{
+  "best_model": "RandomForest",
+  "test_accuracy": 0.9973937123309985,
+  "train_accuracy_augmented": 0.9999429646951463,
+  "n_train": 35066,
+  "n_test": 6139
+}

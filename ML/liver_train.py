@@ -73,10 +73,6 @@ df.columns = [c.strip().replace('\xa0', ' ').replace('\u00A0',' ').replace(' ', 
 
 print("Columns:", df.columns.tolist())
 
-# Expecting the fields:
-# Age, Gender, TB (Total Bilirubin), DB (Direct Bilirubin), Alkphos,
-# Sgpt, Sgot, TP, ALB, A/G_Ratio (maybe named 'A/G Ratio' before cleanup), Result
-
 # map column name variants
 col_map = {}
 for c in df.columns:
@@ -109,7 +105,6 @@ required = ['Age','Gender','TB','DB','Alkphos','Sgpt','Sgot','TP','ALB','A_G','R
 missing_required = [r for r in required if r not in col_map]
 if missing_required:
     print("⚠ Missing expected columns (attempting to proceed):", missing_required)
-    # don't fail hard; proceed with what's available
 
 # rename cols to standard names for pipeline
 rename_dict = {v:k for k,v in col_map.items()}
@@ -124,7 +119,10 @@ for c in df.select_dtypes(include=['object']).columns:
 # Fix gender: map male/female to 1/0
 if 'Gender' in df.columns:
     df['Gender'] = df['Gender'].replace({'M':'Male','F':'Female','m':'Male','f':'Female'})
-    df['Gender'] = df['Gender'].map(lambda x: 1 if str(x).strip().lower().startswith('m') else (0 if str(x).strip().lower().startswith('f') else np.nan))
+    df['Gender'] = df['Gender'].map(
+        lambda x: 1 if str(x).strip().lower().startswith('m')
+        else (0 if str(x).strip().lower().startswith('f') else np.nan)
+    )
 
 # Map Result: original dataset uses 1 (Liver Patient) and 2 (Non Liver)
 if 'Result' not in df.columns:
@@ -143,7 +141,6 @@ print("📊 Class distribution (original):")
 print(df['Category'].value_counts())
 
 # ---------------- Select features ----------------
-# Keep columns in a consistent order (Age, Gender, TB, DB, Alkphos, Sgpt, Sgot, TP, ALB, A_G)
 features = []
 for key in ['Age','Gender','TB','DB','Alkphos','Sgpt','Sgot','TP','ALB','A_G']:
     if key in df.columns:
@@ -182,7 +179,9 @@ print("✅ feature_order saved to", os.path.join(OUTPUT_DIR, "feature_order.json
 
 # ---------------- Train/test split ----------------
 print("\n🔀 Stratified train/test split (test_size=", TEST_SIZE, ")")
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
+)
 print("   Train:", X_train.shape, "Test:", X_test.shape)
 
 # ---------------- SMOTE on TRAIN only ----------------
@@ -202,7 +201,6 @@ joblib.dump(scaler, os.path.join(OUTPUT_DIR, "scaler.pkl"))
 print("✅ scaler saved to", os.path.join(OUTPUT_DIR, "scaler.pkl"))
 
 # ---------------- Label encoder (for mapping to strings) ----------------
-# We have binary 0/1 — but create a label encoder for consistency
 label_encoder = LabelEncoder()
 label_encoder.fit([0,1])
 joblib.dump(label_encoder, os.path.join(OUTPUT_DIR, "label_encoder.pkl"))
@@ -215,8 +213,12 @@ print("✅ label mapping saved")
 # ---------------- Models --------------------------------
 print("\n🚀 Preparing candidate models...")
 models = {
-    "RandomForest": RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE, class_weight='balanced'),
-    "LogisticRegression": LogisticRegression(max_iter=2000, class_weight='balanced', solver='liblinear'),
+    "RandomForest": RandomForestClassifier(
+        n_estimators=200, random_state=RANDOM_STATE, class_weight='balanced'
+    ),
+    "LogisticRegression": LogisticRegression(
+        max_iter=2000, class_weight='balanced', solver='liblinear'
+    ),
     "XGBoost": XGBClassifier(
         n_estimators=200,
         learning_rate=0.05,
@@ -227,7 +229,11 @@ models = {
         random_state=RANDOM_STATE
     )
 }
-skf = StratifiedKFold(n_splits=min(N_SPLITS, max(2, int(len(y_train_res) / 10))), shuffle=True, random_state=RANDOM_STATE)
+skf = StratifiedKFold(
+    n_splits=min(N_SPLITS, max(2, int(len(y_train_res) / 10))),
+    shuffle=True,
+    random_state=RANDOM_STATE
+)
 
 best_model = None
 best_name = None
@@ -237,20 +243,21 @@ model_perfs = []
 for idx, (name, model) in enumerate(models.items(), start=1):
     print(f"\n[{idx}/{len(models)}] Training {name} ...")
     try:
-        # Train on augmented training set
         model.fit(X_train_s, y_train_res)
-        # Evaluate on test
         y_pred = model.predict(X_test_s)
         acc_test = accuracy_score(y_test, y_pred)
         print(f"   -> Test accuracy: {acc_test:.4f}")
         model_perfs.append((name, model, acc_test))
-        # Save confusion matrix + report
+
         print("   Classification report:")
         print(classification_report(y_test, y_pred, target_names=["No_Disease","Disease"]))
 
         cm = confusion_matrix(y_test, y_pred)
         plt.figure(figsize=(5,4))
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=["No","Yes"], yticklabels=["No","Yes"])
+        sns.heatmap(
+            cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=["No","Yes"], yticklabels=["No","Yes"]
+        )
         plt.title(f"{name} - Test Confusion Matrix")
         plt.tight_layout()
         cm_path = os.path.join(OUTPUT_DIR, f"{name}_confusion.png")
@@ -304,13 +311,30 @@ print(classification_report(y_test, y_pred_final, target_names=["No_Disease","Di
 # Save final confusion matrix
 cm_final = confusion_matrix(y_test, y_pred_final)
 plt.figure(figsize=(6,5))
-sns.heatmap(cm_final, annot=True, fmt="d", cmap="Purples", xticklabels=["No","Yes"], yticklabels=["No","Yes"])
+sns.heatmap(
+    cm_final, annot=True, fmt="d", cmap="Purples",
+    xticklabels=["No","Yes"], yticklabels=["No","Yes"]
+)
 plt.title(f"Final Model ({best_name}) Confusion Matrix")
 plt.tight_layout()
 final_cm_path = os.path.join(OUTPUT_DIR, f"final_confusion_{best_name}.png")
 plt.savefig(final_cm_path)
 plt.close()
 print("Saved final confusion matrix to:", final_cm_path)
+
+# ---------- NEW: write metrics.json for PHP dashboard ----------
+metrics = {
+    "best_model": best_name,
+    "test_accuracy": float(test_acc_final),
+    "train_accuracy_augmented": float(final_model.score(X_train_s, y_train_res)),
+    "n_train": int(len(X_train_s)),
+    "n_test": int(len(X_test_s)),
+}
+metrics_path = os.path.join(OUTPUT_DIR, "metrics.json")
+with open(metrics_path, "w") as f:
+    json.dump(metrics, f, indent=2)
+print("Saved metrics.json to:", metrics_path)
+# ---------------------------------------------------------------
 
 # ---------------- Save artifacts ----------------
 print("\n💾 Saving artifacts for deployment...")

@@ -22,18 +22,20 @@ $current_page = basename($_SERVER['PHP_SELF']);
     margin-bottom: 20px;
 }
 .card {
-    flex: 1 1 calc(50% - 20px);
+    flex: 1 1 calc(50% - 20px); /* two cards per row on larger screens */
     background: #fff;
     padding: 20px;
     border-radius: 10px;
     box-shadow: 0 0 15px rgba(0,0,0,0.05);
-    min-width: 300px;
+    min-width: 280px;
 }
-.card h5, .card h3 { margin-bottom: 15px; }
+.card h5, .card h3 {
+    margin-bottom: 15px;
+}
 .chart-container {
     position: relative;
     width: 100%;
-    height: 250px;
+    height: 260px;
 }
 .data-table-container {
     overflow-x: auto;
@@ -77,7 +79,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
 
 <div class="content">
 
-    <!-- Charts Row -->
+    <!-- First row: Disease & Gender -->
     <div class="dashboard-row">
         <div class="card">
             <h5>Disease Distribution</h5>
@@ -87,6 +89,10 @@ $current_page = basename($_SERVER['PHP_SELF']);
             <h5>Gender Breakdown</h5>
             <div class="chart-container"><canvas id="genderChart"></canvas></div>
         </div>
+    </div>
+
+    <!-- Second row: Risk & Top Factors -->
+    <div class="dashboard-row">
         <div class="card">
             <h5>Risk Levels</h5>
             <div class="chart-container"><canvas id="riskChart"></canvas></div>
@@ -97,76 +103,84 @@ $current_page = basename($_SERVER['PHP_SELF']);
         </div>
     </div>
 
-    <!-- Patient Trend -->
+    <!-- Third row: Patient Trend (full width) -->
     <div class="dashboard-row">
-        <div class="card" style="flex:1 1 100%;">
+        <div class="card" style="flex: 1 1 100%;">
             <h5>Patient Probability Trend</h5>
             <div class="autocomplete">
                 <input id="patientInput" type="text" placeholder="Search or select patient ID">
             </div>
-            <div class="chart-container" style="margin-top:15px;"><canvas id="trendChart"></canvas></div>
+            <div class="chart-container" style="margin-top:15px;">
+                <canvas id="trendChart"></canvas>
+            </div>
         </div>
     </div>
 
-    <!-- Recent Predictions Table -->
-    <div class="card">
-        <h3>Recent Prediction Activity</h3>
-        <div class="data-table-container">
-            <table class="data-table display nowrap" style="width:100%">
-                <thead>
-                    <tr>
-                        <th>Patient ID</th>
-                        <th>Age</th>
-                        <th>Gender</th>
-                        <th>Prediction</th>
-                        <th>Probability</th>
-                        <th>Risk Level</th>
-                        <th>Date</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php
-                    $pdo = getPDO();
-                    $sql = "SELECT patient_id, age, gender, predicted_label AS prediction, probability, risk_level, created_at FROM predictions ORDER BY created_at DESC LIMIT 10";
-                    $stmt = $pdo->query($sql);
+    <!-- Fourth row: Recent Predictions (full width) -->
+    <div class="dashboard-row">
+        <div class="card" style="flex: 1 1 100%;">
+            <h3>Recent Prediction Activity</h3>
+            <div class="data-table-container">
+                <table class="data-table display nowrap" style="width:100%">
+                    <thead>
+                        <tr>
+                            <th>Patient ID</th>
+                            <th>Age</th>
+                            <th>Gender</th>
+                            <th>Prediction</th>
+                            <th>Probability</th>
+                            <th>Risk Level</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $pdo = getPDO();
+                        $sql = "SELECT patient_id, age, gender, predicted_label AS prediction, probability, risk_level, created_at 
+                                FROM predictions 
+                                ORDER BY created_at DESC 
+                                LIMIT 10";
+                        $stmt = $pdo->query($sql);
 
-                    if ($stmt === false) {
-                        $errorInfo = $pdo->errorInfo();
-                        $errorMsg = ($errorInfo[0] !== '00000')
-                            ? "SQL Error: " . htmlspecialchars($errorInfo[2])
-                            : "Database query failed.";
-                        echo "<tr><td colspan='7' style='text-align:center;'>{$errorMsg}</td></tr>";
-                    } else {
-                        $has_rows = false;
-                        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                            $decrypted_id = decrypt_data($row['patient_id']);
-                            $decrypted_gender = decrypt_data($row['gender'] ?? '');
-                            $decrypted_age = decrypt_data($row['age'] ?? '');
-                            $decrypted_prediction = decrypt_data($row['prediction'] ?? '');
-                            $probability = htmlspecialchars($row['probability']);
-                            $risk_level = htmlspecialchars($row['risk_level']);
-                            $created_at = htmlspecialchars($row['created_at']);
+                        if ($stmt === false) {
+                            $errorInfo = $pdo->errorInfo();
+                            $errorMsg = ($errorInfo[0] !== '00000')
+                                ? "SQL Error: " . htmlspecialchars($errorInfo[2])
+                                : "Database query failed.";
+                            echo "<tr><td colspan='7' style='text-align:center;'>{$errorMsg}</td></tr>";
+                        } else {
+                            $has_rows = false;
+                            while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $decrypted_id = decrypt_data($row['patient_id']);
+                                $decrypted_gender = decrypt_data($row['gender'] ?? '');
+                                $decrypted_age = decrypt_data($row['age'] ?? '');
+                                $decrypted_prediction = decrypt_data($row['prediction'] ?? '');
+                                $probability = htmlspecialchars($row['probability']);
+                                $risk_level = htmlspecialchars($row['risk_level']);
+                                $created_at = htmlspecialchars($row['created_at']);
 
-                            echo "<tr>
-                                    <td>{$decrypted_id}</td>
-                                    <td>{$decrypted_age}</td>
-                                    <td>{$decrypted_gender}</td>
-                                    <td>{$decrypted_prediction}</td>
-                                    <td>{$probability}%</td>
-                                    <td>{$risk_level}</td>
-                                    <td>{$created_at}</td>
-                                  </tr>";
-                            $has_rows = true;
+                                echo "<tr>
+                                        <td>{$decrypted_id}</td>
+                                        <td>{$decrypted_age}</td>
+                                        <td>{$decrypted_gender}</td>
+                                        <td>{$decrypted_prediction}</td>
+                                        <td>{$probability}%</td>
+                                        <td>{$risk_level}</td>
+                                        <td>{$created_at}</td>
+                                     </tr>";
+                                $has_rows = true;
+                            }
+                            if (!$has_rows) {
+                                echo "<tr><td colspan='7' style='text-align:center;'>No prediction records found.</td></tr>";
+                            }
                         }
-                        if (!$has_rows) {
-                            echo "<tr><td colspan='7' style='text-align:center;'>No prediction records found.</td></tr>";
-                        }
-                    }
-                    ?>
-                </tbody>
-            </table>
+                        ?>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
+
 </div>
 
 <!-- JS Dependencies -->
@@ -191,29 +205,72 @@ async function loadDashboardData() {
         // Disease Distribution
         new Chart(document.getElementById('distChart'), {
             type: 'pie',
-            data: { labels: data.labels, datasets: [{ data: data.counts, backgroundColor: ['#0047AB', '#007BFF', '#36A2EB', '#80D0FF'] }] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+            data: {
+                labels: data.labels,
+                datasets: [{
+                    data: data.counts,
+                    backgroundColor: ['#0047AB', '#007BFF', '#36A2EB', '#80D0FF']
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } }
+            }
         });
 
         // Gender Breakdown
         new Chart(document.getElementById('genderChart'), {
             type: 'bar',
-            data: { labels: data.genderLabels, datasets: [{ label: 'Count', data: data.genderCounts, backgroundColor: '#0047AB' }] },
-            options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } }, plugins: { legend: { display: false } } }
+            data: {
+                labels: data.genderLabels,
+                datasets: [{
+                    label: 'Count',
+                    data: data.genderCounts,
+                    backgroundColor: '#0047AB'
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: { y: { beginAtZero: true } },
+                plugins: { legend: { display: false } }
+            }
         });
 
         // Risk Levels
         new Chart(document.getElementById('riskChart'), {
             type: 'doughnut',
-            data: { labels: Object.keys(data.riskCounts), datasets: [{ data: Object.values(data.riskCounts), backgroundColor:['#28a745','#ffc107','#dc3545'] }] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+            data: {
+                labels: Object.keys(data.riskCounts),
+                datasets: [{
+                    data: Object.values(data.riskCounts),
+                    backgroundColor:['#28a745','#ffc107','#dc3545']
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom' } }
+            }
         });
 
         // Top Factors
         new Chart(document.getElementById('factorChart'), {
             type: 'bar',
-            data: { labels: Object.keys(data.topFactors), datasets: [{ label:'Top Factors', data: Object.values(data.topFactors), backgroundColor:'#36A2EB' }] },
-            options: { indexAxis:'y', responsive:true, plugins:{ legend:{display:false} } }
+            data: {
+                labels: Object.keys(data.topFactors),
+                datasets: [{
+                    label:'Top Factors',
+                    data: Object.values(data.topFactors),
+                    backgroundColor:'#36A2EB'
+                }]
+            },
+            options: {
+                indexAxis:'y',
+                responsive:true,
+                plugins:{ legend:{display:false} }
+            }
         });
 
         initAutocomplete(document.getElementById('patientInput'), data.patients);
@@ -239,7 +296,7 @@ function initAutocomplete(inp, arr) {
         this.parentNode.appendChild(listDiv);
 
         arr.forEach(p => {
-            if(p.id.substr(0,val.length).toUpperCase() === val.toUpperCase()) {
+            if (p.id.substr(0,val.length).toUpperCase() === val.toUpperCase()) {
                 const itemDiv = document.createElement("DIV");
                 itemDiv.innerHTML = "<strong>" + p.id.substr(0,val.length) + "</strong>" + p.id.substr(val.length);
                 itemDiv.innerHTML += "<input type='hidden' value='" + p.id + "'>";
@@ -255,15 +312,33 @@ function initAutocomplete(inp, arr) {
 
     inp.addEventListener("keydown", function(e) {
         let x = document.getElementById(this.id + "autocomplete-list");
-        if(x) x = x.getElementsByTagName("div");
-        if(e.keyCode == 40) { currentFocus++; addActive(x); }
-        else if(e.keyCode == 38) { currentFocus--; addActive(x); }
-        else if(e.keyCode == 13) { e.preventDefault(); if(currentFocus > -1) { if(x) x[currentFocus].click(); } }
+        if (x) x = x.getElementsByTagName("div");
+        if (e.keyCode == 40) { currentFocus++; addActive(x); }
+        else if (e.keyCode == 38) { currentFocus--; addActive(x); }
+        else if (e.keyCode == 13) {
+            e.preventDefault();
+            if (currentFocus > -1) {
+                if (x) x[currentFocus].click();
+            }
+        }
     });
 
-    function addActive(x) { if(!x) return false; removeActive(x); if(currentFocus >= x.length) currentFocus=0; if(currentFocus<0) currentFocus=x.length-1; x[currentFocus].classList.add("autocomplete-active"); }
-    function removeActive(x) { for(let i=0;i<x.length;i++) x[i].classList.remove("autocomplete-active"); }
-    function closeAllLists(elmnt) { let x = document.getElementsByClassName("autocomplete-items"); for(let i=0;i<x.length;i++) if(elmnt!=x[i] && elmnt!=inp) x[i].parentNode.removeChild(x[i]); }
+    function addActive(x) {
+        if (!x) return false;
+        removeActive(x);
+        if (currentFocus >= x.length) currentFocus=0;
+        if (currentFocus<0) currentFocus=x.length-1;
+        x[currentFocus].classList.add("autocomplete-active");
+    }
+    function removeActive(x) {
+        for (let i=0;i<x.length;i++) x[i].classList.remove("autocomplete-active");
+    }
+    function closeAllLists(elmnt) {
+        let x = document.getElementsByClassName("autocomplete-items");
+        for (let i=0;i<x.length;i++) {
+            if (elmnt!=x[i] && elmnt!=inp) x[i].parentNode.removeChild(x[i]);
+        }
+    }
     document.addEventListener("click", function (e) { closeAllLists(e.target); });
 }
 
@@ -271,11 +346,11 @@ function initAutocomplete(inp, arr) {
 function renderPatientTrend(patients, patientId) {
     const patientData = patients.filter(p => p.id === patientId);
     const ctx = document.getElementById('trendChart').getContext('2d');
-    if(window.trendChartInstance) window.trendChartInstance.destroy();
+    if (window.trendChartInstance) window.trendChartInstance.destroy();
 
     const pointColors = patientData.map(p => {
-        if(p.risk_level==='High') return '#dc3545';
-        if(p.risk_level==='Medium') return '#ffc107';
+        if (p.risk_level==='High') return '#dc3545';
+        if (p.risk_level==='Medium') return '#ffc107';
         return '#28a745';
     });
 

@@ -51,7 +51,6 @@ def get_shap_explainer():
         print("SHAP not available.")
         return None
     try:
-        # safer masker: zeros with shape (1, n_features) — ideally use training sample
         masker = shap.maskers.Independent(np.zeros((1, len(feature_order))))
         def model_predict(X):
             Xs = scaler.transform(X)
@@ -86,7 +85,6 @@ def normalize_gender(v):
         return None
 
 def safe_get_ag_ratio(data):
-    # accept multiple variants from frontends: "A/G Ratio", "A_G", "AG_Ratio", "AGRatio"
     for k in ["A/G Ratio", "A_G", "AG_Ratio", "AGRatio", "A_G_Ratio"]:
         if k in data:
             try:
@@ -96,9 +94,8 @@ def safe_get_ag_ratio(data):
     return 0.0
 
 def calculate_entropy(proba):
-    # proba is iterable of class probabilities, sum ~1
     entropy = -sum([p * log(p + 1e-12) for p in proba])
-    max_entropy = log(2)  # for binary
+    max_entropy = log(2)
     return float(entropy / max_entropy)
 
 def model_agreement_score(primary_conf, secondary_conf):
@@ -115,22 +112,34 @@ def shap_support_strength(shap_vals):
     except:
         return 0.5
 
-def interpret_factor(feature, impact):
+def interpret_factor(feature, impact, disease_flag):
     try:
         impact = float(impact)
-        trend = "increased the likelihood of disease" if impact > 0 else "reduced the likelihood of disease"
         strength = abs(impact)
+
         if strength > 0.5:
             level = "strongly"
         elif strength > 0.2:
             level = "moderately"
         else:
             level = "slightly"
+
+        if disease_flag:
+            if impact > 0:
+                trend = "increased the likelihood of liver disease"
+            else:
+                trend = "reduced the likelihood of liver disease (protective effect)"
+        else:
+            if impact > 0:
+                trend = "helped the model stay confident there is no liver disease (protective effect)"
+            else:
+                trend = "pushed the model slightly towards liver disease but not enough to change the final decision"
+
         return f"{feature} {level} {trend} (impact: {impact:.3f})"
-    except:
+    except Exception:
         return f"{feature} impact {impact}"
 
-def compute_top_factors(X_np):
+def compute_top_factors(X_np, disease_flag):
     try:
         X_np = np.asarray(X_np)
         if X_np.ndim == 1:
@@ -151,43 +160,46 @@ def compute_top_factors(X_np):
             shap_vals = vals_arr.reshape(1, -1)[0]
             pairs = list(zip(feature_order, shap_vals))
             top = sorted(pairs, key=lambda x: abs(x[1]), reverse=True)[:3]
-            return [{"feature": f, "impact": float(v), "explanation": interpret_factor(f, v)} for f, v in top]
+            return [
+                {
+                    "feature": f,
+                    "impact": float(v),
+                    "explanation": interpret_factor(f, v, disease_flag)
+                }
+                for f, v in top
+            ]
         except Exception as e:
-            # fall through to fallback
             print("SHAP computation failed:", e)
-    # fallback: scaled magnitudes
     try:
         Xs = scaler.transform(X_np)
         vals = Xs.squeeze()
         idxs = np.argsort(np.abs(vals))[::-1][:3]
-        return [{"feature": feature_order[i], "impact": float(vals[i]), "explanation": interpret_factor(feature_order[i], vals[i])} for i in idxs]
+        return [
+            {
+                "feature": feature_order[i],
+                "impact": float(vals[i]),
+                "explanation": interpret_factor(feature_order[i], vals[i], disease_flag)
+            }
+            for i in idxs
+        ]
     except Exception as e:
         print("Fallback top factors failed:", e)
         return []
 
-# map numeric label -> human-friendly string
 LABEL_MAP = {0: "No Liver Disease", 1: "Liver Disease"}
 
 def get_class_index_for_value(model, value=1):
-    # Try to find the column index for class value (e.g., 1)
     if hasattr(model, "classes_"):
         try:
             classes = list(model.classes_)
             return classes.index(value)
         except Exception:
             pass
-    # fallback: assume index 1 corresponds to class 1
     return 1
 
 def compute_risk_label(pred_index, disease_prob):
-    """
-    pred_index: the predicted class index (0 or 1)
-    disease_prob: probability assigned to class 'disease' (class 1)
-    returns human risk level string
-    """
     pred_label = LABEL_MAP.get(pred_index, str(pred_index))
     if pred_index == 0:
-        # No Liver Disease: use healthy_prob = 1 - disease_prob
         healthy_prob = 1.0 - disease_prob
         if healthy_prob > 0.85:
             return "Low"
@@ -195,9 +207,7 @@ def compute_risk_label(pred_index, disease_prob):
             return "Medium"
         return "Borderline"
     else:
-        # Liver Disease: use disease_prob to judge severity
         if disease_prob < 0.50:
-            # unlikely, but if predicted 1 with low prob, mark Borderline
             return "Borderline"
         if disease_prob < 0.70:
             return "Mild"
@@ -208,7 +218,7 @@ def compute_risk_label(pred_index, disease_prob):
 # ---------------- Routes ----------------
 @app.route("/", methods=["GET"])
 def root():
-    return jsonify({"message":"LiverCare API running", "model_version": MODEL_VERSION}), 200
+    return jsonify({"message": "LiverCare API running", "model_version": MODEL_VERSION}), 200
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
@@ -217,28 +227,34 @@ def api_predict():
         if not data:
             return jsonify({"success": False, "error": "Invalid JSON"}), 400
 
-        # build feature vector from feature_order (accept multiple names)
+        # build feature vector from feature_order
         missing = []
         x_vals = []
         for feat in feature_order:
-            # accept alternative names for A/G
             if feat in data:
                 raw = data[feat]
             else:
-                # variations
                 alt = None
                 if feat in ["A_G", "A/G", "A/G Ratio", "A_G_Ratio", "AG_Ratio", "AGRatio"]:
-                    alt = data.get("A/G Ratio") or data.get("A_G") or data.get("AG_Ratio") or data.get("AGRatio") or data.get("A_G_Ratio")
-                elif feat.lower() in ["gender","sex"]:
-                    alt = data.get("Gender") or data.get("gender") or data.get("Sex") or data.get("sex")
+                    alt = (
+                        data.get("A/G Ratio") or data.get("A_G") or
+                        data.get("AG_Ratio") or data.get("AGRatio") or
+                        data.get("A_G_Ratio")
+                    )
+                elif feat.lower() in ["gender", "sex"]:
+                    alt = (
+                        data.get("Gender") or data.get("gender") or
+                        data.get("Sex") or data.get("sex")
+                    )
                 else:
                     alt = data.get(feat)
                 raw = alt
+
             if raw is None:
                 missing.append(feat)
                 continue
-            # special handling for gender
-            if str(feat).lower() in ["gender","sex"]:
+
+            if str(feat).lower() in ["gender", "sex"]:
                 g = normalize_gender(raw)
                 if g is None:
                     return jsonify({"success": False, "error": f"Invalid gender value for {feat}: {raw}"}), 400
@@ -249,10 +265,7 @@ def api_predict():
                 except Exception:
                     return jsonify({"success": False, "error": f"Field {feat} must be numeric. Got: {raw}"}), 400
 
-        # Accept a few common alternate short-circuits: if missing only A/G variations, try combined getter
         if missing:
-            # if A/G is the only missing and provided under other keys, handle that
-            # attempt to map a common AG key names from data directly
             ag_keys = ["A/G Ratio","A_G","AG_Ratio","AGRatio","A_G_Ratio"]
             if set(missing) == {"A_G"} or set(missing) == set([k for k in missing if "A_G" in k or "A/G" in k]):
                 found = None
@@ -264,7 +277,6 @@ def api_predict():
                             found = None
                         break
                 if found is not None:
-                    # replace the missing A_G with value
                     try:
                         idx = feature_order.index("A_G")
                         x_vals.insert(idx, float(found))
@@ -293,36 +305,29 @@ def api_predict():
                 else:
                     probs = df_val
             except:
-                probs = np.array([0.5,0.5])
+                probs = np.array([0.5, 0.5])
 
-        # Determine index for disease class (class value 1)
         disease_index = get_class_index_for_value(best_model, 1)
-        # probability of disease
         try:
             disease_prob = float(probs[disease_index])
         except:
-            # fallback: if probs len==2 assume index 1
             disease_prob = float(probs[1]) if len(probs) > 1 else float(np.max(probs))
 
         pred_idx = int(np.argmax(probs))
-        # Map to label strings using LABEL_MAP (0/1)
         pred_label_str = LABEL_MAP.get(pred_idx, str(pred_idx))
-
-        # compute basic confidence (max probability)
         primary_conf = float(np.max(probs))
+        risk_label = compute_risk_label(pred_idx, disease_prob)
+        disease_flag = (pred_idx == 1)
 
-        # SHAP top factors
-        top_factors = compute_top_factors(X)
-
-        # Entropy / uncertainty based confidence component
+        top_factors = compute_top_factors(X, disease_flag)
         entropy_uncertainty = calculate_entropy(probs)
         entropy_confidence = 1 - entropy_uncertainty
 
-        # Second opinion: ALWAYS run alt_model if available (for testing & full comparison)
+        # Second opinion (alt_model) – only when primary_conf is low
         secondary_conf = None
         secondary_probs = None
         second_opinion_obj = None
-        SECOND_OP_THRESHOLD = 0.70  # used for medical_warning only
+        SECOND_OP_THRESHOLD = 0.70
         if primary_conf < SECOND_OP_THRESHOLD and alt_model is not None:
             try:
                 if hasattr(alt_model, "predict_proba"):
@@ -337,8 +342,8 @@ def api_predict():
                             secondary_probs = df_val2
                     except:
                         secondary_probs = None
+
                 if secondary_probs is not None:
-                    # find disease prob index for alt_model
                     sec_disease_idx = get_class_index_for_value(alt_model, 1)
                     try:
                         secondary_conf = float(np.max(secondary_probs))
@@ -357,11 +362,9 @@ def api_predict():
                 second_opinion_obj = {"error": str(e)}
                 secondary_conf = None
 
-        # Model agreement and SHAP strength
         agreement = model_agreement_score(primary_conf, secondary_conf)
         shap_strength = shap_support_strength(top_factors)
 
-        # Final combined confidence (weighted)
         final_confidence = (
             (primary_conf * 0.50) +
             (entropy_confidence * 0.20) +
@@ -370,20 +373,31 @@ def api_predict():
         )
         final_confidence = float(max(0.0, min(1.0, final_confidence)))
 
-        # Compute risk label based on pred_idx and disease_prob
-        risk_label = compute_risk_label(pred_idx, disease_prob)
-
-        # Medical warning if both confidences < 0.70
+        # Medical warning: low confidence AND/OR contradiction
         medical_warning = None
+
+        # 1) Both confidences < 0.70
         if primary_conf < SECOND_OP_THRESHOLD:
             if secondary_conf is None:
-                # alt model not available or failed
                 medical_warning = None
             elif secondary_conf < SECOND_OP_THRESHOLD:
-                medical_warning = "Both predictions have low confidence. Please consult a doctor or medical expert for further evaluation."
+                medical_warning = (
+                    "Both predictions have low confidence. Please consult a doctor or medical expert for further evaluation."
+                )
 
-        # Food recommendations (simple rule)
-        disease_flag = (pred_idx == 1)
+        # 2) Predictions contradict (primary vs second opinion)
+        if second_opinion_obj is not None and isinstance(second_opinion_obj, dict):
+            sec_pred = second_opinion_obj.get("prediction")
+            if sec_pred is not None:
+                main_label = str(pred_label_str).strip().lower()
+                second_label = str(sec_pred).strip().lower()
+                if main_label != second_label:
+                    medical_warning = (
+                        "The primary model and the second-opinion model disagree on the diagnosis. "
+                        "This indicates uncertainty. Please consult a doctor or medical expert before making any decisions."
+                    )
+
+        # Food recommendations
         FOOD_RECOMMENDATIONS = {
             "liver_friendly": [
                 "Leafy greens (spinach, kale)",
@@ -401,9 +415,8 @@ def api_predict():
             ],
             "notes": "General guidelines. Consult a medical professional for personalized advice."
         }
-        food_recs = FOOD_RECOMMENDATIONS if disease_flag else {"note":"No disease predicted — general healthy diet recommended."}
+        food_recs = FOOD_RECOMMENDATIONS if disease_flag else {"note": "No disease predicted — general healthy diet recommended."}
 
-        # Build readable audit hash
         payload_for_hash = {
             "patient_id": data.get("patient_id", ""),
             "features": dict(zip(feature_order, [float(x) for x in x_vals])),
@@ -412,7 +425,23 @@ def api_predict():
         }
         payload_hash = hashlib.sha256(json.dumps(payload_for_hash, sort_keys=True).encode()).hexdigest()
 
-        # Build response
+        if disease_flag:
+            summary_prefix = (
+                f"The model predicted Liver Disease with a {risk_label} risk and "
+                f"{primary_conf*100:.2f}% confidence. "
+                f"The following factors contributed towards liver disease in this case: "
+            )
+        else:
+            summary_prefix = (
+                f"The model predicted No Liver Disease with a {risk_label} risk level and "
+                f"{primary_conf*100:.2f}% confidence. "
+                f"The following factors helped the model stay confident that there is no liver disease: "
+            )
+
+        explanation_text = summary_prefix + " ".join(
+            [t.get("explanation", "") for t in top_factors]
+        )
+
         response = {
             "success": True,
             "prediction": pred_label_str,
@@ -421,7 +450,7 @@ def api_predict():
             "disease_probability": disease_prob,
             "risk_level": risk_label,
             "top_factors": top_factors,
-            "explanation_text": f"The model predicted {pred_label_str} with {risk_label} risk and confidence of {primary_conf*100:.2f}%. " + " ".join([t.get("explanation","") for t in top_factors]),
+            "explanation_text": explanation_text,
             "confidence_original": primary_conf,
             "confidence_entropy_adjusted": entropy_confidence,
             "confidence_model_agreement": agreement,
